@@ -13,9 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # FIX 1: Install the Flutter SDK (This includes the Dart SDK)
+      # FIX 1: Install the Flutter SDK (Corrected Syntax and Indentation)
       - uses: subosito/flutter-action@v2
-        with:
+        with: # <--- FIX APPLIED: This line and the lines below are correctly indented
           # Specify the Flutter version you are targeting (e.g., 3.19.0)
           flutter-version: '3.19.0' 
           channel: 'stable'
@@ -29,8 +29,4 @@ jobs:
         run: flutter analyze
 
       - name: Run tests
-        run: flutter test 
-        
-      # Optional: Add a build step here to create the final APK/Web bundle
-      # - name: Build Web
-      #   run: flutter build web
+        run: flutter test
