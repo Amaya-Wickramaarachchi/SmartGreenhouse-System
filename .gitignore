@@ -1,0 +1,62 @@
+# === MISCELLANEOUS & SYSTEM ===
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# Crucial exclusion for Flutter builds
+/build/
+
+# === IDE CONFIGURATION ===
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# VS Code - UNCOMMENT THIS IF YOU DO NOT SHARE LAUNCH CONFIGS
+#.vscode/
+
+# === FLUTTER/DART/PUB & BUILD ARTIFACTS ===
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/                     # Excludes all build output (APKs, web builds, etc.)
+/coverage/
+**/doc/api/
+**/ios/Flutter/.last_build_id
+/pubspec.lock               # UNCOMMENT THIS LINE if you prefer to let developers
+                            # use their own pub versions, but keep it for consistent builds.
+
+# === ANDROID SPECIFIC (Native Build Caches) ===
+/android/.gradle/
+/android/local.properties   # Contains local SDK path, unique to each machine
+/android/key.properties     # NEVER commit signing keys
+
+# Android Studio will place build artifacts here (often redundant due to /build/ exclusion)
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# === iOS SPECIFIC (Generated Files) ===
+/ios/.symlinks/
+/ios/Flutter/Generated.xcconfig
+/ios/Flutter/flutter_export_environment.sh
+
+# === CRITICAL FIREBASE/SECURITY EXCLUSIONS  ===
+
+.firebaserc               # Firebase project aliases/settings
+.firebase/                # Firebase command-line cache
+/lib/firebase_options.dart  # API Keys, Project ID, and configuration file (SECURITY RISK)
+/lib/firebase_options.g.dart # Generated Firebase options file
+/ios/Runner/GoogleService-Info.plist # iOS configuration file
+/android/app/google-services.json # Android configuration file

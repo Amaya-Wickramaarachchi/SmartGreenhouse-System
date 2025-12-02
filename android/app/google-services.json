@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "399081730042",
+    "project_id": "go-green-dab67",
+    "storage_bucket": "go-green-dab67.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:399081730042:android:edbd4aaa27b85f9365be43",
+        "android_client_info": {
+          "package_name": "com.example.go_green"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDXJhTip8imHgyPlD4epv0noJENmB8-5EI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
