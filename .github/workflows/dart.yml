@@ -1,32 +1,33 @@
 name: Flutter CI/CD
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ubuntu-latest
 
-    steps:
-      - uses: actions/checkout@v4
+    steps:
+      # Check out the repository
+      - uses: actions/checkout@v4
 
-      # FIX 1: Install the Flutter SDK (Corrected Syntax and Indentation)
-      - uses: subosito/flutter-action@v2
-        with: # <--- FIX APPLIED: This line and the lines below are correctly indented
-          # Specify the Flutter version you are targeting (e.g., 3.19.0)
-          flutter-version: '3.19.0' 
-          channel: 'stable'
+      # Install Flutter SDK
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.19.0'
+          channel: 'stable'
 
-      # FIX 2: Correctly use the 'flutter' command for pub get
-      - name: Install dependencies
-        run: flutter pub get
+      # Install project dependencies
+      - name: Install dependencies
+        run: flutter pub get
 
-      # FIX 3: Change Dart-specific commands to Flutter commands
-      - name: Analyze project source
-        run: flutter analyze
+      # Analyze project source code
+      - name: Analyze project source
+        run: flutter analyze
 
-      - name: Run tests
-        run: flutter test
+      # Run unit tests
+      - name: Run tests
+        run: flutter test
