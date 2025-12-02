@@ -11,23 +11,55 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Check out the repository
-      - uses: actions/checkout@v4
+      # 1. Checkout the repository
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      # Install Flutter SDK
-      - uses: subosito/flutter-action@v2
+      # 2. Install Flutter (latest stable or specific version)
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.13.0'
+          flutter-version: '3.13.0'   # Must match Dart SDK >= 3.10
           channel: 'stable'
 
-      # Install project dependencies
+      # 3. Verify Flutter and Dart versions
+      - name: Check Flutter and Dart versions
+        run: |
+          flutter --version
+          dart --version
+
+      # 4. Cache Flutter dependencies
+      - name: Cache Flutter Pub packages
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.pub-cache
+            .packages
+          key: ${{ runner.os }}-flutter-${{ hashFiles('**/pubspec.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-flutter-
+
+      # 5. Get project dependencies
       - name: Install dependencies
         run: flutter pub get
 
-      # Analyze project source code
+      # 6. Analyze source code
       - name: Analyze project source
         run: flutter analyze
 
-      # Run unit tests
-      - name: Run tests
+      # 7. Run tests
+      - name: Run unit tests
         run: flutter test
+
+      # 8. Optional: Build APK for Android
+      - name: Build APK
+        if: github.ref == 'refs/heads/main'
+        run: flutter build apk --release
+
+      # 9. Optional: Upload APK as artifact
+      - name: Upload APK
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v3
+        with:
+          name: app-release.apk
+          path: build/app/outputs/flutter-apk/app-release.apk
