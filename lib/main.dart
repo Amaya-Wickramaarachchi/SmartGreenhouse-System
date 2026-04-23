@@ -56,6 +56,10 @@ class AuthWrapper extends StatelessWidget {
           );
         }
 
+        if (isRegisteringProcess) {
+          return const LoginScreen();
+        }
+
         if (!snapshot.hasData) {
           // User is not logged in
           return const LoginScreen();

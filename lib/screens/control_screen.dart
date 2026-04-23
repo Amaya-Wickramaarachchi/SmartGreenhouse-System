@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
-import 'dart:convert';
-import 'package:mqtt_client/mqtt_client.dart';
-import 'package:mqtt_client/mqtt_server_client.dart';
+import 'dart:async'; // needed for the countdown timer
 
 class ControlScreen extends StatefulWidget {
   const ControlScreen({super.key});
@@ -11,123 +9,265 @@ class ControlScreen extends StatefulWidget {
 }
 
 class _ControlScreenState extends State<ControlScreen> {
-  // MQTT Client
-  MqttServerClient? client;
-  bool _isConnected = false;
-
-  // Actuator States
+  // hardware states
   bool _isPumpOn = false;
   bool _isFanOn = false;
   bool _isMisterOn = false;
   bool _isLedOn = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _setupMqttConnection();
-  }
-
-  // Connect to HiveMQ Cloud [cite: 451, 452]
-  Future<void> _setupMqttConnection() async {
-    client = MqttServerClient.withPort(
-      'c0eacb6e24dd4984814b3e19f4daa7a4.s1.eu.hivemq.cloud',
-      'flutter_control_client_${DateTime.now().millisecondsSinceEpoch}',
-      8883,
-    );
-
-    client!.secure = true;
-    client!.logging(on: false);
-    client!.keepAlivePeriod = 20;
-
-    final connMess = MqttConnectMessage()
-        .withClientIdentifier('flutter_control_client')
-        .authenticateAs(
-          'greenhouse_admin',
-          'Admin@123',
-        ); // ESP32 credentials [cite: 482, 483]
-
-    client!.connectionMessage = connMess;
-
-    try {
-      await client!.connect();
-    } catch (e) {
-      print('Connection failed: $e');
-      client!.disconnect();
-      return;
-    }
-
-    if (client!.connectionStatus!.state == MqttConnectionState.connected) {
-      setState(() {
-        _isConnected = true;
-      });
-      print('Connected to HiveMQ Cloud for Manual Control!');
-    }
-  }
-
-  // Publish a command to the Edge Controller
-  void _publishCommand(String actuator, bool state) {
-    if (_isConnected == false || client == null) return;
-
-    // Create the JSON command
-    final commandMap = {
-      "actuator": actuator,
-      "command": state ? "ON" : "OFF",
-      "override": true, // Tells the Edge Controller to ignore autonomous logic
-    };
-
-    final payload = jsonEncode(commandMap);
-    final builder = MqttClientPayloadBuilder();
-    builder.addString(payload);
-
-    // Publish to a specific control topic
-    const topic = 'greenhouse/control';
-    client!.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!);
-
-    print('Published command: $payload to $topic');
-  }
-
-  // Handle Switch Toggles
-  void _togglePump(bool value) {
-    setState(() => _isPumpOn = value);
-    _publishCommand('Pump', value);
-  }
-
-  void _toggleFan(bool value) {
-    setState(() => _isFanOn = value);
-    _publishCommand('Fan', value);
-  }
-
-  void _toggleMister(bool value) {
-    setState(() => _isMisterOn = value);
-    _publishCommand('Mister', value);
-  }
-
-  void _toggleLed(bool value) {
-    setState(() => _isLedOn = value);
-    _publishCommand('LED', value);
-  }
+  // map to keep track of running timers
+  final Map<String, Timer> _activeTimers = {};
 
   @override
   void dispose() {
-    client?.disconnect();
+    // kill all timers when leaving this screen (prevents memory leaks!)
+    for (var timer in _activeTimers.values) {
+      timer.cancel();
+    }
     super.dispose();
   }
+
+  // quick helper to show popup messages
+  void _showActionSnackBar(String message, {bool isAutoOff = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            Icon(
+              isAutoOff ? Icons.alarm_on : Icons.info_outline,
+              color: Colors.white,
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: Text(message)),
+          ],
+        ),
+        backgroundColor: isAutoOff
+            ? Colors.blue.shade800
+            : Colors.green.shade700,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 4),
+      ),
+    );
+  }
+
+  // core logic for auto-turning off the devices
+  void _handleActuatorTimer(
+    String actuatorId,
+    String name,
+    int duration,
+    Function turnOffAction,
+  ) {
+    // cancel any existing timer for this specific device
+    _activeTimers[actuatorId]?.cancel();
+
+    // start a new timer
+    _activeTimers[actuatorId] = Timer(Duration(minutes: duration), () {
+      if (mounted) {
+        turnOffAction(); // flip the switch back to off
+        _showActionSnackBar(
+          '⏰ Timer finished: $name automatically turned OFF.',
+          isAutoOff: true,
+        );
+      }
+    });
+  }
+
+  // custom dialog box to ask for confirmation and time
+  void _showConfirmationDialog(
+    String actuatorName,
+    bool newValue,
+    Function(bool, int?) onConfirm,
+  ) {
+    int selectedTime = 1; // default starting value is 1 min
+
+    showDialog(
+      context: context,
+      builder: (BuildContext ctx) {
+        // usING StatefulBuilder so the slider updates live inside the dialog
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              title: Row(
+                children: [
+                  Icon(
+                    newValue ? Icons.timer : Icons.power_off,
+                    color: newValue
+                        ? Colors.blue.shade600
+                        : Colors.red.shade600,
+                  ),
+                  const SizedBox(width: 10),
+                  const Text('Manual Override', style: TextStyle(fontSize: 20)),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min, // wrap content to save space
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Are you sure you want to turn ${newValue ? "ON" : "OFF"} the $actuatorName?\n\nThis will override the autonomous logic.',
+                    style: const TextStyle(fontSize: 15),
+                  ),
+
+                  // only show the time slider if the user is turning it ON
+                  if (newValue) ...[
+                    const SizedBox(height: 25),
+                    const Divider(),
+                    const SizedBox(height: 10),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          'Set Duration:',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                        Text(
+                          '$selectedTime mins',
+                          style: TextStyle(
+                            color: Colors.green.shade700,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ],
+                    ),
+                    Slider(
+                      value: selectedTime.toDouble(),
+                      min: 1,
+                      max: 60,
+                      divisions: 59,
+                      activeColor: Colors.green.shade600,
+                      inactiveColor: Colors.green.shade100,
+                      label: '$selectedTime mins',
+                      onChanged: (val) {
+                        setStateDialog(() {
+                          selectedTime = val.toInt(); // update slider UI
+                        });
+                      },
+                    ),
+                  ],
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(), // just close
+                  child: Text(
+                    'Cancel',
+                    style: TextStyle(color: Colors.grey.shade600),
+                  ),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: newValue
+                        ? Colors.green.shade700
+                        : Colors.red.shade600,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    // send the user's choice back to the main screen
+                    onConfirm(newValue, newValue ? selectedTime : null);
+                  },
+                  child: Text(
+                    newValue ? 'Start Timer' : 'Turn OFF',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // --- button click handlers for each device ---
+
+  void _togglePump(bool value) {
+    _showConfirmationDialog('Water Pump', value, (confirmed, duration) {
+      setState(() => _isPumpOn = confirmed);
+      if (confirmed) {
+        _showActionSnackBar('Water Pump ON for $duration minutes.');
+        // start countdown
+        _handleActuatorTimer('pump', 'Water Pump', duration!, () {
+          setState(() => _isPumpOn = false);
+        });
+      } else {
+        _activeTimers['pump']
+            ?.cancel(); // stop timer if user manually turns it off
+        _showActionSnackBar('Water Pump turned OFF manually.');
+      }
+    });
+  }
+
+  void _toggleFan(bool value) {
+    _showConfirmationDialog('Ventilation Fan', value, (confirmed, duration) {
+      setState(() => _isFanOn = confirmed);
+      if (confirmed) {
+        _showActionSnackBar('Ventilation Fan ON for $duration minutes.');
+        _handleActuatorTimer('fan', 'Ventilation Fan', duration!, () {
+          setState(() => _isFanOn = false);
+        });
+      } else {
+        _activeTimers['fan']?.cancel();
+        _showActionSnackBar('Ventilation Fan turned OFF manually.');
+      }
+    });
+  }
+
+  void _toggleMister(bool value) {
+    _showConfirmationDialog('Mister', value, (confirmed, duration) {
+      setState(() => _isMisterOn = confirmed);
+      if (confirmed) {
+        _showActionSnackBar('Mister ON for $duration minutes.');
+        _handleActuatorTimer('mister', 'Mister', duration!, () {
+          setState(() => _isMisterOn = false);
+        });
+      } else {
+        _activeTimers['mister']?.cancel();
+        _showActionSnackBar('Mister turned OFF manually.');
+      }
+    });
+  }
+
+  void _toggleLed(bool value) {
+    _showConfirmationDialog('Shade / LED', value, (confirmed, duration) {
+      setState(() => _isLedOn = confirmed);
+      if (confirmed) {
+        _showActionSnackBar('Shade / LED ON for $duration minutes.');
+        _handleActuatorTimer('led', 'Shade / LED', duration!, () {
+          setState(() => _isLedOn = false);
+        });
+      } else {
+        _activeTimers['led']?.cancel();
+        _showActionSnackBar('Shade / LED turned OFF manually.');
+      }
+    });
+  }
+
+  // --- UI building starts here ---
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Manual Override Control'),
+        title: const Text(
+          'Manual Override Control',
+          style: TextStyle(color: Colors.white),
+        ),
         backgroundColor: Colors.green.shade700,
-        actions: [
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Icon(
-              _isConnected ? Icons.cloud_done : Icons.cloud_off,
-              color: _isConnected ? Colors.white : Colors.redAccent,
-            ),
-          ),
-        ],
+        iconTheme: const IconThemeData(color: Colors.white),
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(20.0),
@@ -140,12 +280,12 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
             const SizedBox(height: 10),
             Text(
-              'Use these switches to override the Edge Computing autonomous logic.',
+              'Use these switches to override the Edge Computing autonomous logic. Timers can be set for up to 60 minutes.',
               style: TextStyle(color: Colors.grey.shade600, fontSize: 14),
             ),
             const SizedBox(height: 30),
 
-            // Control Cards
+            // load our custom cards
             _buildControlCard(
               'Water Pump',
               'Activates irrigation',
@@ -155,14 +295,14 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
             _buildControlCard(
               'Ventilation Fan',
-              'Reduces ambient temperature',
+              'Reduces ambient temp',
               Icons.air,
               _isFanOn,
               _toggleFan,
             ),
             _buildControlCard(
               'Mister',
-              'Increases humidity levels',
+              'Increases humidity',
               Icons.cloudy_snowing,
               _isMisterOn,
               _toggleMister,
@@ -180,7 +320,7 @@ class _ControlScreenState extends State<ControlScreen> {
     );
   }
 
-  // Reusable UI Component for the Switches
+  // UI template for the switches
   Widget _buildControlCard(
     String title,
     String subtitle,
@@ -217,7 +357,7 @@ class _ControlScreenState extends State<ControlScreen> {
           ),
           subtitle: Text(subtitle),
           value: currentValue,
-          onChanged: onChanged,
+          onChanged: onChanged, // triggers the popup dialog
         ),
       ),
     );

@@ -2,18 +2,19 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
-// --- Import the Functional Dashboard Screens ---
+// --- Screen Imports ---
 import 'farmer_dashboard_screen.dart';
 import 'admin_configuration_screen.dart';
+
+// Global flag to prevent auto-login blink
+bool isRegisteringProcess = false;
 
 // --- Firebase Instances ---
 final FirebaseAuth _auth = FirebaseAuth.instance;
 final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
-// --- Visual Constants ---
+// --- Constants ---
 const Color adminLoginColor = Color(0xFF5A7079);
-
-// ---------------------------------------------
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -38,20 +39,14 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  // --- Core Role-Based Logic ---
-
+  // --- Role Verification ---
   Future<void> _fetchUserRoleAndNavigate(User user) async {
     try {
       final userDoc = await _firestore.collection('users').doc(user.uid).get();
 
       if (!userDoc.exists) {
         await _auth.signOut();
-        if (mounted) {
-          _showSnackBar(
-            'User role data missing. Please contact support.',
-            isError: true,
-          );
-        }
+        if (mounted) _showSnackBar('User role missing.', isError: true);
         return;
       }
 
@@ -61,51 +56,35 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (storedRole == 'Farmer') {
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(
-            builder: (context) => const FarmerDashboardScreen(),
-          ),
+          MaterialPageRoute(builder: (_) => const FarmerDashboardScreen()),
         );
       } else if (storedRole == 'Admin') {
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(
-            builder: (context) => const AdminConfigurationScreen(),
-          ),
+          MaterialPageRoute(builder: (_) => const AdminConfigurationScreen()),
         );
       } else {
         await _auth.signOut();
-        if (mounted) {
-          _showSnackBar(
-            'Invalid user role assigned. Access denied.',
-            isError: true,
-          );
-        }
+        if (mounted)
+          _showSnackBar('Invalid role. Access denied.', isError: true);
       }
     } catch (e) {
       await _auth.signOut();
-      if (mounted) {
-        _showSnackBar(
-          'Failed to verify user role: ${e.toString()}',
-          isError: true,
-        );
-      }
+      if (mounted) _showSnackBar('Failed to verify role.', isError: true);
     }
   }
 
+  // --- Login Handler ---
   Future<void> _handleLogin() async {
     final email = _usernameController.text.trim();
     final password = _passwordController.text.trim();
 
     if (email.isEmpty || password.isEmpty) {
-      if (mounted) {
-        _showSnackBar('Please enter both email and password.', isError: true);
-      }
+      if (mounted) _showSnackBar('Enter email and password.', isError: true);
       return;
     }
 
     if (!mounted) return;
-    setState(() {
-      _isLoading = true;
-    });
+    setState(() => _isLoading = true);
 
     try {
       final userCredential = await _auth.signInWithEmailAndPassword(
@@ -116,27 +95,16 @@ class _LoginScreenState extends State<LoginScreen> {
         await _fetchUserRoleAndNavigate(userCredential.user!);
       }
     } on FirebaseAuthException {
-      if (mounted) {
-        _showSnackBar(
-          'Invalid credentials. Please check your email and password.',
-          isError: true,
-        );
-      }
+      if (mounted) _showSnackBar('Invalid credentials.', isError: true);
     } catch (e) {
-      if (mounted) {
-        _showSnackBar(
-          'An unexpected error occurred during login: ${e.toString()}',
-          isError: true,
-        );
-      }
+      if (mounted) _showSnackBar('Unexpected error occurred.', isError: true);
     } finally {
-      if (!mounted) return;
-      setState(() {
-        _isLoading = false;
-      });
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
+  // --- Registration Handler ---
+  // --- Registration Handler ---
   void _showRegistrationDialog() {
     final TextEditingController regEmailController = TextEditingController();
     final TextEditingController regPasswordController = TextEditingController();
@@ -159,118 +127,214 @@ class _LoginScreenState extends State<LoginScreen> {
               }
               if (regPasswordController.text.length < 6) {
                 _showSnackBar(
-                  'Password must be at least 6 characters long.',
+                  'Password must be at least 6 characters.',
                   isError: true,
                 );
                 return;
               }
 
-              setState(() {
-                isRegistering = true;
-              });
+              // Show custom loading animation
+              setState(() => isRegistering = true);
+              isRegisteringProcess = true;
 
               final email = regEmailController.text.trim();
               final password = regPasswordController.text.trim();
               final role = isFarmerMode ? 'Farmer' : 'Admin';
 
               try {
+                // Create user
                 final userCredential = await _auth
                     .createUserWithEmailAndPassword(
                       email: email,
                       password: password,
                     );
+
+                // Save role to Firestore
                 await _firestore
                     .collection('users')
                     .doc(userCredential.user!.uid)
                     .set({'email': email, 'role': role});
 
-                Navigator.of(dialogContext).pop();
-                _showSnackBar('Registration successful! Logged in as $role.');
-                await _fetchUserRoleAndNavigate(userCredential.user!);
+                // Prevent auto-login
+                await _auth.signOut();
+                isRegisteringProcess = false;
+
+                // Close registration dialog
+                if (dialogContext.mounted) {
+                  Navigator.of(dialogContext).pop();
+                }
+
+                // Show success alert
+                if (mounted) {
+                  showDialog(
+                    context: context,
+                    barrierDismissible: false, // Force OK click
+                    builder: (BuildContext alertContext) {
+                      return AlertDialog(
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(15),
+                        ),
+                        title: const Row(
+                          children: [
+                            Icon(
+                              Icons.check_circle,
+                              color: Colors.green,
+                              size: 28,
+                            ),
+                            SizedBox(width: 10),
+                            Text(
+                              'Success',
+                              style: TextStyle(
+                                color: Colors.green,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                        content: const Text(
+                          'Registration successful!\nPlease login again with your new account.',
+                          style: TextStyle(fontSize: 16),
+                        ),
+                        actions: [
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.green,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                              ),
+                              onPressed: () => Navigator.of(alertContext).pop(),
+                              child: const Text(
+                                'OK',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  );
+                }
               } on FirebaseAuthException catch (e) {
-                String message = e.message ?? 'Registration failed.';
-                _showSnackBar(message, isError: true);
-                setState(() {
-                  isRegistering = false;
-                });
+                isRegisteringProcess = false;
+                _showSnackBar(
+                  e.message ?? 'Registration failed.',
+                  isError: true,
+                );
+                setState(
+                  () => isRegistering = false,
+                ); // Show form again on error
               } catch (e) {
-                _showSnackBar('An unexpected error occurred.', isError: true);
-                setState(() {
-                  isRegistering = false;
-                });
+                isRegisteringProcess = false;
+                _showSnackBar('Unexpected error occurred.', isError: true);
+                setState(
+                  () => isRegistering = false,
+                ); // Show form again on error
               }
             }
 
             return AlertDialog(
-              title: Text('Register as ${isFarmerMode ? "Farmer" : "Admin"}'),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: regEmailController,
-                      keyboardType: TextInputType.emailAddress,
-                      decoration: const InputDecoration(
-                        labelText: 'Email (Username)',
-                      ),
-                      enabled: !isRegistering,
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: regPasswordController,
-                      obscureText: true,
-                      decoration: const InputDecoration(
-                        labelText: 'Password (Min 6 characters)',
-                      ),
-                      enabled: !isRegistering,
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: regConfirmPasswordController,
-                      obscureText: true,
-                      decoration: const InputDecoration(
-                        labelText: 'Confirm Password',
-                      ),
-                      enabled: !isRegistering,
-                    ),
-                  ],
-                ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(15),
               ),
-              actions: [
-                TextButton(
-                  onPressed: isRegistering
-                      ? null
-                      : () => Navigator.of(context).pop(),
-                  child: const Text('CANCEL'),
-                ),
-                ElevatedButton(
-                  onPressed: isRegistering ? null : performRegistration,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.green,
-                  ),
-                  child: isRegistering
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            color: Colors.white,
-                            strokeWidth: 2,
-                          ),
-                        )
-                      : const Text(
+              // Hide title while loading
+              title: isRegistering
+                  ? null
+                  : Text('Register as ${isFarmerMode ? "Farmer" : "Admin"}'),
+              // AnimatedSwitcher gives a smooth fade effect
+              content: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 300),
+                child: isRegistering
+                    // --- Loading UI with Leaf Icon ---
+                    ? const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 40.0),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircularProgressIndicator(color: Colors.green),
+                            SizedBox(height: 24),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.eco, color: Colors.green),
+                                SizedBox(width: 8),
+                                Text(
+                                  'Creating account...',
+                                  style: TextStyle(
+                                    color: Colors.green,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      )
+                    // --- Registration Form UI ---
+                    : SingleChildScrollView(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            TextField(
+                              controller: regEmailController,
+                              keyboardType: TextInputType.emailAddress,
+                              decoration: const InputDecoration(
+                                labelText: 'Email',
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            TextField(
+                              controller: regPasswordController,
+                              obscureText: true,
+                              decoration: const InputDecoration(
+                                labelText: 'Password (Min 6 chars)',
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            TextField(
+                              controller: regConfirmPasswordController,
+                              obscureText: true,
+                              decoration: const InputDecoration(
+                                labelText: 'Confirm Password',
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+              ),
+              // Hide action buttons while loading
+              actions: isRegistering
+                  ? []
+                  : [
+                      TextButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        child: const Text('CANCEL'),
+                      ),
+                      ElevatedButton(
+                        onPressed: performRegistration,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                        ),
+                        child: const Text(
                           'REGISTER NOW',
                           style: TextStyle(color: Colors.white),
                         ),
-                ),
-              ],
+                      ),
+                    ],
             );
           },
         );
       },
     );
   }
-  // --- FIX: Helper Methods (Moved inside the class) ---
 
+  // --- UI Helpers ---
   Widget _buildModeButton({
     required String label,
     required IconData icon,
@@ -319,7 +383,6 @@ class _LoginScreenState extends State<LoginScreen> {
       ),
     );
   }
-  // --- END OF FIX ---
 
   @override
   void dispose() {
@@ -328,12 +391,9 @@ class _LoginScreenState extends State<LoginScreen> {
     super.dispose();
   }
 
-  // --- Main UI Build Method ---
   @override
   Widget build(BuildContext context) {
     final screenHeight = MediaQuery.of(context).size.height;
-
-    // Trigger the image tag here, just before the layout is built
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -343,14 +403,8 @@ class _LoginScreenState extends State<LoginScreen> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: <Widget>[
-              SizedBox(height: screenHeight * 0.05),
-              // Logo Placeholder
-              SizedBox(height: screenHeight * 0.05),
-              Image.asset(
-                'assets/smartgreen_logo.png', // YOUR LOGO IS HERE
-                height: 80,
-                width: 80,
-              ),
+              SizedBox(height: screenHeight * 0.1),
+              Image.asset('assets/smartgreen_logo.png', height: 80, width: 80),
               const SizedBox(height: 10),
               const Text(
                 'SmartGreen',
@@ -362,7 +416,6 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               SizedBox(height: screenHeight * 0.05),
 
-              // 2. Login Mode Selection Buttons
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -386,7 +439,6 @@ class _LoginScreenState extends State<LoginScreen> {
 
               SizedBox(height: screenHeight * 0.05),
 
-              // 3. Username Input Field
               TextField(
                 controller: _usernameController,
                 keyboardType: TextInputType.emailAddress,
@@ -397,7 +449,6 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               const SizedBox(height: 20),
 
-              // 4. Password Input Field
               TextField(
                 controller: _passwordController,
                 obscureText: true,
@@ -409,7 +460,6 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               const SizedBox(height: 30),
 
-              // 5. Main Login Button
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
@@ -439,7 +489,6 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               const SizedBox(height: 20),
 
-              // 6. Registration Link
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
