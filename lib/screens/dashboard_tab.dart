@@ -1,13 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-
-// Placeholder data structure (used only if Firestore data is unavailable)
-Map<String, dynamic> _defaultSensorData = {
-  'temperature': 'N/A',
-  'humidity': 'N/A',
-  'soilMoisture': 'N/A',
-  'lightIntensity': 'N/A',
-};
+import 'dart:convert';
+import 'package:mqtt_client/mqtt_client.dart';
+import 'package:mqtt_client/mqtt_server_client.dart';
+import 'package:percent_indicator/percent_indicator.dart';
 
 class DashboardTab extends StatefulWidget {
   const DashboardTab({super.key});
@@ -17,35 +12,96 @@ class DashboardTab extends StatefulWidget {
 }
 
 class _DashboardTabState extends State<DashboardTab> {
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  late Stream<DocumentSnapshot> _sensorStream;
+  MqttServerClient? client;
 
-  String _healthStatus = 'CHECKING...';
-  Color _healthColor = Colors.grey;
+  // --- MOCK DATA FOR DASHBOARD ---
+  double? _temp1 = 29.2;
+  double? _temp2 = 28.5;
+  double? _humidity = 76.5;
+  double? _soilMoisture = 60.0;
+  double? _lightLux = 15200.0;
+
+  String _healthStatus = 'SYSTEM OPTIMAL';
+  Color _healthColor = Colors.green.shade600;
+  // -------------------------------------------------------------------
 
   @override
   void initState() {
     super.initState();
-    // Stream data from the specific Firestore document updated by the Edge Device
-    _sensorStream = _firestore
-        .collection('sensor_data')
-        .doc('latest_data')
-        .snapshots();
+    _setupMqttConnection();
   }
 
-  // Helper function to update the health status based on streamed data
-  // This logic compares incoming data against Admin-set thresholds[cite: 301].
-  void _updateHealthStatus(Map<String, dynamic> data) {
-    double? temp = double.tryParse(data['temperature'].toString() ?? '0');
-    double? moisture = double.tryParse(data['soilMoisture'].toString() ?? '0');
+  Future<void> _setupMqttConnection() async {
+    // HiveMQ Cloud Credentials
+    client = MqttServerClient.withPort(
+      'c0eacb6e24dd4984814b3e19f4daa7a4.s1.eu.hivemq.cloud',
+      'flutter_mobile_client_${DateTime.now().millisecondsSinceEpoch}',
+      8883,
+    );
 
-    if (temp == null || moisture == null || temp == 0 || moisture == 0) {
-      _healthStatus = 'NO DATA';
-      _healthColor = Colors.grey;
-    } else if (temp > 32) {
+    client!.secure = true;
+    client!.logging(on: false);
+    client!.keepAlivePeriod = 20;
+
+    final connMess = MqttConnectMessage()
+        .withClientIdentifier('flutter_mobile_client')
+        .authenticateAs('greenhouse_admin', 'Admin@123');
+
+    client!.connectionMessage = connMess;
+
+    try {
+      await client!.connect();
+    } catch (e) {
+      print('Exception: $e');
+      client!.disconnect();
+      setState(() {
+        _healthStatus = 'CONNECTION ERROR';
+        _healthColor = Colors.red;
+      });
+      return;
+    }
+
+    if (client!.connectionStatus!.state == MqttConnectionState.connected) {
+      const topic = 'greenhouse/telemetry';
+      client!.subscribe(topic, MqttQos.atMostOnce);
+
+      client!.updates!.listen((List<MqttReceivedMessage<MqttMessage?>>? c) {
+        final recMess = c![0].payload as MqttPublishMessage;
+        final payload = MqttPublishPayload.bytesToStringAsString(
+          recMess.payload.message,
+        );
+        _parseSensorData(payload);
+      });
+    }
+  }
+
+  void _parseSensorData(String payload) {
+    try {
+      Map<String, dynamic> data = jsonDecode(payload);
+
+      setState(() {
+        // Extracting exact keys from ESP32 payload
+        _temp1 = (data['temperature_1'] as num?)?.toDouble();
+        _temp2 = (data['temperature_2'] as num?)?.toDouble();
+        _humidity = (data['humidity'] as num?)?.toDouble();
+        _soilMoisture = (data['soil_moisture'] as num?)?.toDouble();
+        _lightLux = (data['light_lux'] as num?)?.toDouble();
+
+        _updateHealthStatus();
+      });
+    } catch (e) {
+      print('Error parsing JSON: $e');
+    }
+  }
+
+  void _updateHealthStatus() {
+    if (_temp1 == null || _soilMoisture == null) {
+      _healthStatus = 'WAITING FOR DATA';
+      _healthColor = Colors.orange;
+    } else if (_temp1! > 32) {
       _healthStatus = 'WARNING: HIGH TEMP';
       _healthColor = Colors.red.shade700;
-    } else if (moisture < 20) {
+    } else if (_soilMoisture! < 40) {
       _healthStatus = 'WARNING: LOW MOISTURE';
       _healthColor = Colors.amber.shade700;
     } else {
@@ -54,97 +110,117 @@ class _DashboardTabState extends State<DashboardTab> {
     }
   }
 
-  // ----------------------------------------------------
-  // --- BUILD METHOD START ---
-  // ----------------------------------------------------
+  @override
+  void dispose() {
+    client?.disconnect();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final isWeb = MediaQuery.of(context).size.width > 700;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          _buildHealthStatusBanner(),
+          const SizedBox(height: 30),
 
-    return StreamBuilder<DocumentSnapshot>(
-      stream: _sensorStream,
-      builder: (context, snapshot) {
-        // Use data from the snapshot or default data if loading/error
-        Map<String, dynamic> data = _defaultSensorData;
-        if (snapshot.hasData && snapshot.data!.exists) {
-          data = snapshot.data!.data() as Map<String, dynamic>;
-          _updateHealthStatus(data);
-        } else if (snapshot.hasError) {
-          _healthStatus = 'ERROR';
-          _healthColor = Colors.red;
-        }
+          const Text(
+            'Environmental Conditions',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 20),
 
-        return SingleChildScrollView(
-          padding: const EdgeInsets.all(20.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              // 1. Health Status Banner (Prominent, color-coded) [cite: 300]
-              _buildHealthStatusBanner(),
-              const SizedBox(height: 20),
-
-              // 2. Real-time Condition Cards [cite: 298]
-              _buildConditionCards(context, isWeb, data),
-              const SizedBox(height: 30),
-
-              // 3. Historical Data Section
-              const Text(
-                'Historical Data (Day by Day)',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          // 1. Circular Gauges for Temp and Humidity
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _buildCircularGauge(
+                title: 'Temperature 1',
+                value: _temp1,
+                unit: '°C',
+                maxLimit: 50.0,
+                progressColor: Colors.orange,
+                icon: Icons.thermostat,
               ),
-              const SizedBox(height: 10),
+              _buildCircularGauge(
+                title: 'Humidity',
+                value: _humidity,
+                unit: '%',
+                maxLimit: 100.0,
+                progressColor: Colors.blue,
+                icon: Icons.water_drop,
+              ),
+            ],
+          ),
+          const SizedBox(height: 30),
 
-              // Placeholder for Interactive Line Graph [cite: 302]
-              Container(
-                height: isWeb ? 400 : 250,
-                width: double.infinity,
-                color: Colors.grey.shade100,
-                child: Center(
-                  child: snapshot.connectionState == ConnectionState.waiting
-                      ? const CircularProgressIndicator()
-                      : Text(
-                          'Interactive Time-Series Graph Widget (Uses ActuatorLog/SensorData collections)',
-                          style: TextStyle(color: Colors.grey.shade500),
-                        ),
+          // 2. Linear Progress Bar for Soil Moisture
+          _buildLinearProgressBar(
+            title: 'Soil Moisture',
+            value: _soilMoisture,
+            progressColor: Colors.brown.shade400,
+          ),
+          const SizedBox(height: 30),
+
+          // 3. Simple Cards for Light Lux and Temp 2
+          Row(
+            children: [
+              Expanded(
+                child: _buildSimpleCard(
+                  'Light Intensity',
+                  '${_lightLux ?? '--'} Lux',
+                  Icons.light_mode,
+                  Colors.amber,
+                ),
+              ),
+              const SizedBox(width: 15),
+              Expanded(
+                child: _buildSimpleCard(
+                  'Temperature 2',
+                  '${_temp2 ?? '--'} °C',
+                  Icons.device_thermostat,
+                  Colors.orangeAccent,
                 ),
               ),
             ],
           ),
-        );
-      },
+        ],
+      ),
     );
   }
-  // ----------------------------------------------------
-  // --- BUILD METHOD END ---
-  // ----------------------------------------------------
 
-  // --- Helper Widgets ---
+  // --- UI Builder Methods ---
 
   Widget _buildHealthStatusBanner() {
     return Container(
       padding: const EdgeInsets.all(15.0),
       decoration: BoxDecoration(
         color: _healthColor,
-        borderRadius: BorderRadius.circular(8.0),
+        borderRadius: BorderRadius.circular(10.0),
+        boxShadow: const [
+          BoxShadow(color: Colors.black12, blurRadius: 4, offset: Offset(0, 2)),
+        ],
       ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(
-            _healthStatus == 'HEALTHY'
-                ? Icons.check_circle_outline
-                : Icons.warning_amber,
+            _healthStatus.contains('OPTIMAL') || _healthStatus == 'HEALTHY'
+                ? Icons.check_circle
+                : Icons.warning_amber_rounded,
             color: Colors.white,
-            size: 28,
+            size: 30,
           ),
-          const SizedBox(width: 10),
-          Text(
-            'Current Condition: $_healthStatus',
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
+          const SizedBox(width: 15),
+          Expanded(
+            child: Text(
+              _healthStatus,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
             ),
           ),
         ],
@@ -152,77 +228,136 @@ class _DashboardTabState extends State<DashboardTab> {
     );
   }
 
-  Widget _buildConditionCards(
-    BuildContext context,
-    bool isWeb,
-    Map<String, dynamic> data,
-  ) {
-    final sensorMetrics = [
-      {
-        'label': 'LIGHT',
-        'value': '${data['lightIntensity'] ?? 'N/A'} LUX',
-        'icon': Icons.lightbulb_outline,
-      },
-      {
-        'label': 'TEMP',
-        'value': '${data['temperature'] ?? 'N/A'} °C',
-        'icon': Icons.thermostat_outlined,
-      },
-      {
-        'label': 'HUMIDITY',
-        'value': '${data['humidity'] ?? 'N/A'} %',
-        'icon': Icons.opacity,
-      },
-      {
-        'label': 'SOIL MOISTURE',
-        'value': '${data['soilMoisture'] ?? 'N/A'} %',
-        'icon': Icons.water_drop_outlined,
-      },
-    ];
+  // Circular Gauge Widget
+  Widget _buildCircularGauge({
+    required String title,
+    required double? value,
+    required String unit,
+    required double maxLimit,
+    required Color progressColor,
+    required IconData icon,
+  }) {
+    // Calculate percentage (0.0 to 1.0)
+    double percent = 0.0;
+    if (value != null) {
+      percent = value / maxLimit;
+      if (percent > 1.0) percent = 1.0;
+      if (percent < 0.0) percent = 0.0;
+    }
 
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      itemCount: sensorMetrics.length,
-      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: isWeb ? 4 : 2,
-        crossAxisSpacing: 15,
-        mainAxisSpacing: 15,
-        childAspectRatio: isWeb ? 1.0 : 1.2,
-      ),
-      itemBuilder: (context, index) {
-        final metric = sensorMetrics[index];
-        return Card(
-          elevation: 2,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          child: Column(
+    return Column(
+      children: [
+        CircularPercentIndicator(
+          radius: 60.0,
+          lineWidth: 12.0,
+          animation: true,
+          animateFromLastPercent: true,
+          percent: percent,
+          center: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(
-                metric['icon'] as IconData?,
-                color: Colors.green,
-                size: isWeb ? 40 : 30,
-              ),
-              const SizedBox(height: 5),
+              Icon(icon, color: progressColor, size: 24),
+              const SizedBox(height: 4),
               Text(
-                metric['value'] as String,
-                style: TextStyle(
-                  fontSize: isWeb ? 22 : 20,
+                value != null ? '${value.toStringAsFixed(1)}$unit' : '--',
+                style: const TextStyle(
                   fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 5),
-              Text(
-                metric['label'] as String,
-                style: TextStyle(
-                  fontSize: isWeb ? 14 : 12,
-                  color: Colors.grey.shade600,
+                  fontSize: 18.0,
                 ),
               ),
             ],
           ),
-        );
-      },
+          circularStrokeCap: CircularStrokeCap.round,
+          progressColor: progressColor,
+          backgroundColor: Colors.grey.shade200,
+        ),
+        const SizedBox(height: 10),
+        Text(
+          title,
+          style: TextStyle(
+            color: Colors.grey.shade700,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
+    );
+  }
+
+  // Linear Progress Bar Widget
+  Widget _buildLinearProgressBar({
+    required String title,
+    required double? value,
+    required Color progressColor,
+  }) {
+    double percent = 0.0;
+    if (value != null) {
+      percent = value / 100.0;
+      if (percent > 1.0) percent = 1.0;
+      if (percent < 0.0) percent = 0.0;
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+            Text(
+              value != null ? '${value.toStringAsFixed(1)}%' : '--',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        LinearPercentIndicator(
+          lineHeight: 20.0,
+          animation: true,
+          animateFromLastPercent: true,
+          percent: percent,
+          barRadius: const Radius.circular(10),
+          progressColor: progressColor,
+          backgroundColor: Colors.grey.shade200,
+        ),
+      ],
+    );
+  }
+
+  // Simple Card Widget for Light and Temp2
+  Widget _buildSimpleCard(
+    String title,
+    String value,
+    IconData icon,
+    Color color,
+  ) {
+    return Container(
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        boxShadow: const [
+          BoxShadow(color: Colors.black12, blurRadius: 4, offset: Offset(0, 2)),
+        ],
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: color, size: 30),
+          const SizedBox(height: 10),
+          Text(
+            value,
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            title,
+            style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
     );
   }
 }

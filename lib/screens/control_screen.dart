@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-
-// Placeholder for Actuator control color (matching Admin button for contrast)
-const Color actuatorControlColor = Color(0xFF5A7079);
+import 'dart:convert';
+import 'package:mqtt_client/mqtt_client.dart';
+import 'package:mqtt_client/mqtt_server_client.dart';
 
 class ControlScreen extends StatefulWidget {
   const ControlScreen({super.key});
@@ -11,235 +11,213 @@ class ControlScreen extends StatefulWidget {
 }
 
 class _ControlScreenState extends State<ControlScreen> {
-  // State variables for the operational mode and actuator levels (0.0 to 100.0)
-  bool _isAutoMode = true; // Default mode is Auto
-  double _ventilationFanValue = 0.0;
-  double _lightsValue = 0.0;
-  double _irrigationPumpValue = 0.0;
-  double _coolingFansValue = 0.0;
+  // MQTT Client
+  MqttServerClient? client;
+  bool _isConnected = false;
 
-  // Function to show the critical Warning Alert
-  void _showSafetyWarningAlert() {
-    showDialog(
-      context: context,
-      barrierDismissible: false, // User must interact with buttons
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Text(
-            '⚠️ Warning: Manual Override',
-            style: TextStyle(color: Colors.red),
-          ),
-          content: const Text(
-            'Are you sure you want to switch from Automated Mode? '
-            'Manual Mode disables critical automated climate and irrigation control. '
-            'This action requires confirmation.',
-          ),
-          actions: <Widget>[
-            TextButton(
-              child: const Text(
-                'CANCEL',
-                style: TextStyle(
-                  color: Colors.green,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              onPressed: () {
-                Navigator.of(
-                  context,
-                ).pop(); // Dismiss the dialog, keeping _isAutoMode = true
-              },
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red,
-                foregroundColor: Colors.white,
-              ),
-              child: const Text(
-                'CONFIRM MANUAL MODE',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              onPressed: () {
-                setState(() {
-                  _isAutoMode = false; // Set to Manual Mode
-                });
-                // TODO: Log action to ActuatorLog and RequestSetMode(Manual) to Edge Device
-                print('Mode set to Manual. Sending command to Edge Device...');
-                Navigator.of(context).pop(); // Dismiss the dialog
-              },
-            ),
-          ],
-        );
-      },
-    );
+  // Actuator States
+  bool _isPumpOn = false;
+  bool _isFanOn = false;
+  bool _isMisterOn = false;
+  bool _isLedOn = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _setupMqttConnection();
   }
 
-  // Function to handle the mode toggle click
-  void _handleModeToggle(bool newValue) {
-    if (_isAutoMode == true && newValue == false) {
-      // User is attempting to switch from Auto to Manual: trigger warning
-      _showSafetyWarningAlert();
-    } else {
-      // User is switching from Manual (false) back to Auto (true)
+  // Connect to HiveMQ Cloud [cite: 451, 452]
+  Future<void> _setupMqttConnection() async {
+    client = MqttServerClient.withPort(
+      'c0eacb6e24dd4984814b3e19f4daa7a4.s1.eu.hivemq.cloud',
+      'flutter_control_client_${DateTime.now().millisecondsSinceEpoch}',
+      8883,
+    );
+
+    client!.secure = true;
+    client!.logging(on: false);
+    client!.keepAlivePeriod = 20;
+
+    final connMess = MqttConnectMessage()
+        .withClientIdentifier('flutter_control_client')
+        .authenticateAs(
+          'greenhouse_admin',
+          'Admin@123',
+        ); // ESP32 credentials [cite: 482, 483]
+
+    client!.connectionMessage = connMess;
+
+    try {
+      await client!.connect();
+    } catch (e) {
+      print('Connection failed: $e');
+      client!.disconnect();
+      return;
+    }
+
+    if (client!.connectionStatus!.state == MqttConnectionState.connected) {
       setState(() {
-        _isAutoMode = true; // Set back to Auto Mode
-        // Reset manual values for a clean switch (optional)
-        _ventilationFanValue = _lightsValue = _irrigationPumpValue =
-            _coolingFansValue = 0.0;
+        _isConnected = true;
       });
-      // TODO: Log action to ActuatorLog and RequestSetMode(Auto) to Edge Device
-      print('Mode set to Auto. Sending command to Edge Device...');
+      print('Connected to HiveMQ Cloud for Manual Control!');
     }
   }
 
-  // Helper widget to build the individual actuator control sliders
-  Widget _buildActuatorControl(
-    String label,
-    double currentValue,
-    ValueSetter<double> onChanged,
-  ) {
-    // Determine the ON/OFF status for immediate feedback
-    String status = currentValue > 0 ? "ON" : "OFF";
-    Color statusColor = currentValue > 0 ? Colors.green : Colors.grey;
-    bool isEnabled = !_isAutoMode; // Control is only enabled in Manual Mode
+  // Publish a command to the Edge Controller
+  void _publishCommand(String actuator, bool state) {
+    if (_isConnected == false || client == null) return;
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                label,
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
-                  color: isEnabled ? Colors.black87 : Colors.grey.shade500,
-                ),
-              ),
-              Text(
-                'Status: $status',
-                style: TextStyle(
-                  color: isEnabled ? statusColor : Colors.grey.shade500,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-          Slider(
-            value: currentValue,
-            min: 0,
-            max: 100, // Representing Intensity or Power Percentage
-            divisions: 10,
-            label: currentValue.round().toString(),
-            // Only allow changes if NOT in Auto Mode
-            onChanged: isEnabled ? onChanged : null,
-            activeColor: isEnabled
-                ? actuatorControlColor
-                : Colors.grey.shade400,
-            inactiveColor: Colors.grey.shade300,
-          ),
-        ],
-      ),
-    );
+    // Create the JSON command
+    final commandMap = {
+      "actuator": actuator,
+      "command": state ? "ON" : "OFF",
+      "override": true, // Tells the Edge Controller to ignore autonomous logic
+    };
+
+    final payload = jsonEncode(commandMap);
+    final builder = MqttClientPayloadBuilder();
+    builder.addString(payload);
+
+    // Publish to a specific control topic
+    const topic = 'greenhouse/control';
+    client!.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!);
+
+    print('Published command: $payload to $topic');
+  }
+
+  // Handle Switch Toggles
+  void _togglePump(bool value) {
+    setState(() => _isPumpOn = value);
+    _publishCommand('Pump', value);
+  }
+
+  void _toggleFan(bool value) {
+    setState(() => _isFanOn = value);
+    _publishCommand('Fan', value);
+  }
+
+  void _toggleMister(bool value) {
+    setState(() => _isMisterOn = value);
+    _publishCommand('Mister', value);
+  }
+
+  void _toggleLed(bool value) {
+    setState(() => _isLedOn = value);
+    _publishCommand('LED', value);
+  }
+
+  @override
+  void dispose() {
+    client?.disconnect();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: AppBar(
+        title: const Text('Manual Override Control'),
+        backgroundColor: Colors.green.shade700,
+        actions: [
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Icon(
+              _isConnected ? Icons.cloud_done : Icons.cloud_off,
+              color: _isConnected ? Colors.white : Colors.redAccent,
+            ),
+          ),
+        ],
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(20.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
+          children: [
             const Text(
-              'Farmer Interface - Control Tab',
+              'Actuator Controls',
               style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             ),
-            const SizedBox(height: 20),
-
-            // 1. Mode Selector Toggle
-            Container(
-              padding: const EdgeInsets.all(15),
-              decoration: BoxDecoration(
-                color: _isAutoMode ? Colors.green : actuatorControlColor,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    _isAutoMode
-                        ? 'Automation Mode (ON)'
-                        : 'Manual Mode (OVERRIDE)',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  Switch(
-                    value: _isAutoMode,
-                    onChanged:
-                        _handleModeToggle, // Triggers warning if switching off
-                    activeThumbColor: Colors.white,
-                    inactiveThumbColor: Colors.white,
-                    inactiveTrackColor: Colors.grey.shade400,
-                  ),
-                ],
-              ),
+            const SizedBox(height: 10),
+            Text(
+              'Use these switches to override the Edge Computing autonomous logic.',
+              style: TextStyle(color: Colors.grey.shade600, fontSize: 14),
             ),
             const SizedBox(height: 30),
 
-            // 2. Manual Controls Section Label
-            Text(
-              'Manual Controls',
-              style: TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-                color: _isAutoMode ? Colors.grey : Colors.black87,
-              ),
+            // Control Cards
+            _buildControlCard(
+              'Water Pump',
+              'Activates irrigation',
+              Icons.water_drop,
+              _isPumpOn,
+              _togglePump,
             ),
-            const SizedBox(height: 10),
-
-            // 3. Actuator Sliders (Enabled only when _isAutoMode is false)
-
-            // Ventilation Fans Control
-            _buildActuatorControl('Ventilation Fans', _ventilationFanValue, (
-              newValue,
-            ) {
-              setState(() {
-                _ventilationFanValue = newValue;
-              });
-              // TODO: Send ControlActuator(ActuatorID, State) to the Edge Device
-            }),
-
-            // Lights Control
-            _buildActuatorControl('Lights', _lightsValue, (newValue) {
-              setState(() {
-                _lightsValue = newValue;
-              });
-            }),
-
-            // Irrigation Pump Control
-            _buildActuatorControl('Irrigation Pump', _irrigationPumpValue, (
-              newValue,
-            ) {
-              setState(() {
-                _irrigationPumpValue = newValue;
-              });
-            }),
-
-            // Cooling Fans Control
-            _buildActuatorControl('Cooling Fans', _coolingFansValue, (
-              newValue,
-            ) {
-              setState(() {
-                _coolingFansValue = newValue;
-              });
-            }),
+            _buildControlCard(
+              'Ventilation Fan',
+              'Reduces ambient temperature',
+              Icons.air,
+              _isFanOn,
+              _toggleFan,
+            ),
+            _buildControlCard(
+              'Mister',
+              'Increases humidity levels',
+              Icons.cloudy_snowing,
+              _isMisterOn,
+              _toggleMister,
+            ),
+            _buildControlCard(
+              'Shade / LED',
+              'Controls light intensity',
+              Icons.lightbulb,
+              _isLedOn,
+              _toggleLed,
+            ),
           ],
+        ),
+      ),
+    );
+  }
+
+  // Reusable UI Component for the Switches
+  Widget _buildControlCard(
+    String title,
+    String subtitle,
+    IconData icon,
+    bool currentValue,
+    Function(bool) onChanged,
+  ) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 15.0),
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+        child: SwitchListTile(
+          activeThumbColor: Colors.green.shade600,
+          secondary: Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: currentValue
+                  ? Colors.green.shade100
+                  : Colors.grey.shade200,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              icon,
+              color: currentValue
+                  ? Colors.green.shade700
+                  : Colors.grey.shade600,
+            ),
+          ),
+          title: Text(
+            title,
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+          ),
+          subtitle: Text(subtitle),
+          value: currentValue,
+          onChanged: onChanged,
         ),
       ),
     );

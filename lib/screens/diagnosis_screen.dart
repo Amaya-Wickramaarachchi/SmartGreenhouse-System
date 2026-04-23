@@ -1,61 +1,8 @@
 import 'package:flutter/material.dart';
 import 'dart:io';
 import 'dart:convert';
-import 'package:http/http.dart' as http;
-import 'package:http_parser/http_parser.dart';
 import 'package:image_picker/image_picker.dart';
-
-const String mlEndpoint =
-    'https://tomato-farm-app-dasun.azurewebsites.net/analyze';
-
-class PredictionResult {
-  final String diseaseName;
-  final double confidenceScore;
-  final bool isHealthy;
-  final int totalFruits;
-  final int ripeFruits;
-  final int unripeFruits;
-  final String recommendation;
-
-  PredictionResult({
-    required this.diseaseName,
-    required this.confidenceScore,
-    required this.isHealthy,
-    required this.totalFruits,
-    required this.ripeFruits,
-    required this.unripeFruits,
-    required this.recommendation,
-  });
-
-  factory PredictionResult.fromJson(Map<String, dynamic> json) {
-    final health = json['plant_health'] ?? {};
-    final harvest = json['harvest_info'] ?? {};
-
-    String confidenceStr = (health['confidence'] as String? ?? '0%')
-        .replaceAll('%', '')
-        .trim();
-    double confidence = (double.tryParse(confidenceStr) ?? 0.0);
-
-    final ripe = harvest['ripe_fruits'] ?? 0;
-    final unripe = harvest['unripe_fruits'] ?? 0;
-
-    String recommendationText = (health['is_healthy'] == false)
-        ? 'Disease: ${health['status']}, Action: Consult a specialist.'
-        : (harvest['ready_to_harvest'] == true)
-        ? 'Ready for harvest. Ripe fruits: $ripe'
-        : 'Plant is healthy. Total fruits: ${harvest['total_fruits'] ?? 0}';
-
-    return PredictionResult(
-      diseaseName: health['status'] ?? 'N/A',
-      confidenceScore: confidence,
-      isHealthy: health['is_healthy'] ?? true,
-      totalFruits: harvest['total_fruits'] ?? 0,
-      ripeFruits: ripe,
-      unripeFruits: unripe,
-      recommendation: recommendationText,
-    );
-  }
-}
+import 'package:http/http.dart' as http;
 
 class DiagnosisScreen extends StatefulWidget {
   const DiagnosisScreen({super.key});
@@ -65,203 +12,571 @@ class DiagnosisScreen extends StatefulWidget {
 }
 
 class _DiagnosisScreenState extends State<DiagnosisScreen> {
-  XFile? _imageFile;
-  PredictionResult? _lastResult;
-  bool _isAnalyzing = false;
+  File? _image;
   final ImagePicker _picker = ImagePicker();
+  bool _isLoading = false;
 
-  void _showSnackBar(String message, {bool isError = false}) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        duration: const Duration(seconds: 4),
-        backgroundColor: isError ? Colors.red.shade700 : Colors.green.shade700,
-      ),
-    );
+  // ML Results State
+  String? _diseaseStatus;
+  double? _diseaseConfidence;
+  int? _totalFruits;
+  String? _harvestStatus;
+
+  // Scan Type State ('leaf' or 'fruit')
+  String _scanType = 'leaf';
+
+  final String apiUrl = "https://dasunz-tomato-disease-api.hf.space/analyze";
+
+  void _clearResults() {
+    _diseaseStatus = null;
+    _diseaseConfidence = null;
+    _totalFruits = null;
+    _harvestStatus = null;
   }
 
   Future<void> _pickImage(ImageSource source) async {
     final pickedFile = await _picker.pickImage(source: source);
     if (pickedFile != null) {
       setState(() {
-        _imageFile = pickedFile;
-        _lastResult = null;
+        _image = File(pickedFile.path);
+        _clearResults();
       });
     }
   }
 
-  Future<void> _analyzePlant() async {
-    if (_imageFile == null) {
-      _showSnackBar('Please select an image first.', isError: true);
-      return;
-    }
+  Future<void> _analyzeImage() async {
+    if (_image == null) return;
 
     setState(() {
-      _isAnalyzing = true;
+      _isLoading = true;
     });
 
     try {
-      var request = http.MultipartRequest('POST', Uri.parse(mlEndpoint));
-      final bytes = await _imageFile!.readAsBytes();
+      var request = http.MultipartRequest('POST', Uri.parse(apiUrl));
+      request.fields['scan_type'] = _scanType;
       request.files.add(
-        http.MultipartFile.fromBytes(
-          'file',
-          bytes,
-          filename: _imageFile!.name,
-          contentType: MediaType('image', _imageFile!.name.split('.').last),
-        ),
+        await http.MultipartFile.fromPath('file', _image!.path),
       );
 
-      var streamedResponse = await request.send();
+      var streamedResponse = await request.send().timeout(
+        const Duration(seconds: 60),
+        onTimeout: () => throw Exception("Server Timeout: Model is waking up."),
+      );
+
       var response = await http.Response.fromStream(streamedResponse);
 
       if (response.statusCode == 200) {
-        var jsonResponse = json.decode(response.body);
-        setState(() {
-          _lastResult = PredictionResult.fromJson(jsonResponse);
-        });
+        var jsonResult = jsonDecode(response.body);
+
+        if (jsonResult.containsKey('error')) {
+          _showErrorDialog(jsonResult['error']);
+        } else {
+          setState(() {
+            if (_scanType == 'leaf') {
+              _diseaseStatus = jsonResult['status'];
+              String confStr =
+                  jsonResult['confidence']?.toString().replaceAll('%', '') ??
+                  '0';
+              _diseaseConfidence = double.tryParse(confStr) ?? 0.0;
+            } else if (_scanType == 'fruit') {
+              _totalFruits = jsonResult['total_fruits'];
+              _harvestStatus = jsonResult['harvest_status'];
+            }
+          });
+        }
       } else {
-        _showSnackBar(
-          'ML API Failed (Code ${response.statusCode}).',
-          isError: true,
-        );
+        _showErrorDialog("Backend Error: ${response.statusCode}");
       }
     } catch (e) {
-      _showSnackBar('Network error: $e', isError: true);
+      _showErrorDialog(
+        e.toString().contains('Timeout')
+            ? "Server is waking up. Please wait and try again."
+            : "Failed to connect. Please check your internet.",
+      );
     } finally {
       setState(() {
-        _isAnalyzing = false;
+        _isLoading = false;
       });
     }
+  }
+
+  void _showErrorDialog(String message) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text(
+          "Notice",
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        content: Text(message),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text(
+              "OK",
+              style: TextStyle(
+                color: Colors.green,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Colors.grey.shade50,
       appBar: AppBar(
-        title: const Text('SmartGreen AI'),
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black,
+        title: const Text(
+          'Smart Brain AI',
+          style: TextStyle(
+            fontWeight: FontWeight.w800,
+            letterSpacing: 0.5,
+            color: Colors.black87,
+          ),
+        ),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        centerTitle: true,
+        iconTheme: const IconThemeData(color: Colors.black87),
       ),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
+        physics: const BouncingScrollPhysics(),
+        padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 10.0),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Image display
+            // --- Modern Segmented Toggle (Apple iOS Style) ---
             Container(
-              height: 200,
-              width: double.infinity,
+              padding: const EdgeInsets.all(4),
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(12),
                 color: Colors.grey.shade200,
-                image: _imageFile != null
-                    ? DecorationImage(
-                        image: FileImage(File(_imageFile!.path)),
-                        fit: BoxFit.cover,
-                      )
-                    : const DecorationImage(
-                        image: AssetImage('assets/placeholder.png'),
-                        fit: BoxFit.cover,
+                borderRadius: BorderRadius.circular(30),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () => setState(() {
+                        _scanType = 'leaf';
+                        _clearResults();
+                      }),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 250),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        decoration: BoxDecoration(
+                          color: _scanType == 'leaf'
+                              ? Colors.white
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(25),
+                          boxShadow: _scanType == 'leaf'
+                              ? [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.05),
+                                    blurRadius: 10,
+                                    offset: const Offset(0, 4),
+                                  ),
+                                ]
+                              : [],
+                        ),
+                        child: Center(
+                          child: Text(
+                            '🌿 Leaf Disease',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: _scanType == 'leaf'
+                                  ? Colors.green.shade800
+                                  : Colors.grey.shade600,
+                            ),
+                          ),
+                        ),
                       ),
+                    ),
+                  ),
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () => setState(() {
+                        _scanType = 'fruit';
+                        _clearResults();
+                      }),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 250),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        decoration: BoxDecoration(
+                          color: _scanType == 'fruit'
+                              ? Colors.white
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(25),
+                          boxShadow: _scanType == 'fruit'
+                              ? [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.05),
+                                    blurRadius: 10,
+                                    offset: const Offset(0, 4),
+                                  ),
+                                ]
+                              : [],
+                        ),
+                        child: Center(
+                          child: Text(
+                            '🍅 Fruit Health',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: _scanType == 'fruit'
+                                  ? Colors.orange.shade800
+                                  : Colors.grey.shade600,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 15),
-            // Camera & Gallery buttons
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: () => _pickImage(ImageSource.camera),
-                  icon: const Icon(Icons.camera_alt, color: Colors.white),
-                  label: const Text(
-                    'Camera',
-                    style: TextStyle(color: Colors.white),
+            const SizedBox(height: 30),
+
+            // --- Modern Image Upload Container ---
+            Container(
+              height: 280,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(30),
+                boxShadow: [
+                  BoxShadow(
+                    color: _scanType == 'leaf'
+                        ? Colors.green.withOpacity(0.08)
+                        : Colors.orange.withOpacity(0.08),
+                    blurRadius: 24,
+                    offset: const Offset(0, 10),
                   ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.green,
+                ],
+                border: Border.all(
+                  color: _scanType == 'leaf'
+                      ? Colors.green.shade100
+                      : Colors.orange.shade100,
+                  width: 2,
+                ),
+              ),
+              child: _image != null
+                  ? ClipRRect(
+                      borderRadius: BorderRadius.circular(28),
+                      child: Image.file(
+                        _image!,
+                        fit: BoxFit.cover,
+                        width: double.infinity,
+                      ),
+                    )
+                  : Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(20),
+                          decoration: BoxDecoration(
+                            color: _scanType == 'leaf'
+                                ? Colors.green.shade50
+                                : Colors.orange.shade50,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            _scanType == 'leaf'
+                                ? Icons.energy_savings_leaf
+                                : Icons.eco,
+                            size: 50,
+                            color: _scanType == 'leaf'
+                                ? Colors.green.shade400
+                                : Colors.orange.shade400,
+                          ),
+                        ),
+                        const SizedBox(height: 15),
+                        Text(
+                          'Upload a ${_scanType == 'leaf' ? 'Leaf' : 'Fruit'} Photo',
+                          style: TextStyle(
+                            color: Colors.grey.shade600,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+            ),
+            const SizedBox(height: 25),
+
+            // --- Sleek Camera & Gallery Buttons ---
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _pickImage(ImageSource.camera),
+                    icon: Icon(
+                      Icons.camera_alt_outlined,
+                      color: Colors.green.shade700,
+                    ),
+                    label: Text(
+                      'Camera',
+                      style: TextStyle(
+                        color: Colors.green.shade800,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      side: BorderSide(color: Colors.green.shade200, width: 2),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
                   ),
                 ),
-                ElevatedButton.icon(
-                  onPressed: () => _pickImage(ImageSource.gallery),
-                  icon: const Icon(Icons.photo, color: Colors.white),
-                  label: const Text(
-                    'Gallery',
-                    style: TextStyle(color: Colors.white),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.green,
+                const SizedBox(width: 15),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _pickImage(ImageSource.gallery),
+                    icon: Icon(
+                      Icons.photo_library_outlined,
+                      color: Colors.green.shade700,
+                    ),
+                    label: Text(
+                      'Gallery',
+                      style: TextStyle(
+                        color: Colors.green.shade800,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      side: BorderSide(color: Colors.green.shade200, width: 2),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 20),
-            // Analyze Plant button
-            SizedBox(
-              width: double.infinity,
-              height: 50,
+            const SizedBox(height: 35),
+
+            // --- Modern Gradient Analyze Button ---
+            Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: _scanType == 'leaf'
+                        ? Colors.green.withOpacity(0.3)
+                        : Colors.orange.withOpacity(0.3),
+                    blurRadius: 15,
+                    offset: const Offset(0, 8),
+                  ),
+                ],
+                gradient: LinearGradient(
+                  colors: _scanType == 'leaf'
+                      ? [Colors.green.shade500, Colors.green.shade800]
+                      : [Colors.orange.shade400, Colors.deepOrange.shade600],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+              ),
               child: ElevatedButton(
-                onPressed: _isAnalyzing ? null : _analyzePlant,
-                child: _isAnalyzing
-                    ? const CircularProgressIndicator(color: Colors.white)
+                onPressed: _image != null && !_isLoading ? _analyzeImage : null,
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 18),
+                  backgroundColor: Colors.transparent,
+                  shadowColor: Colors.transparent,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                ),
+                child: _isLoading
+                    ? const SizedBox(
+                        height: 24,
+                        width: 24,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 3,
+                        ),
+                      )
                     : const Text(
-                        'ANALYZE PLANT',
-                        style: TextStyle(fontSize: 18, color: Colors.white),
+                        'Start AI Analysis',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                          letterSpacing: 1,
+                        ),
                       ),
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
               ),
             ),
             const SizedBox(height: 30),
-            // Analysis Results Card
-            if (_lastResult != null)
-              Card(
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                elevation: 3,
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: const [
-                          Icon(Icons.medical_services, color: Colors.red),
-                          SizedBox(width: 8),
-                          Text(
-                            'Plant Health',
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.red,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const Divider(),
-                      Text(
-                        'Status: ${_lastResult!.diseaseName}',
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.red,
-                        ),
-                      ),
-                      const SizedBox(height: 5),
-                      Text(
-                        'Confidence: ${_lastResult!.confidenceScore.toStringAsFixed(1)}%',
-                      ),
-                      const SizedBox(height: 5),
-                      Text('Total Fruits: ${_lastResult!.totalFruits}'),
-                      Text('Ripe Fruits: ${_lastResult!.ripeFruits}'),
-                      const SizedBox(height: 5),
-                      Text('Recommendation: ${_lastResult!.recommendation}'),
-                    ],
-                  ),
-                ),
-              ),
+
+            // --- Results Section ---
+            if (_diseaseStatus != null || _totalFruits != null)
+              _buildModernResultCard(),
+            const SizedBox(height: 30),
           ],
         ),
       ),
     );
+  }
+
+  // --- Modern UI Component for Results ---
+  Widget _buildModernResultCard() {
+    if (_scanType == 'fruit') {
+      return Container(
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: Colors.orange.shade50,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: Colors.orange.shade200, width: 2),
+        ),
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.orange.withOpacity(0.1),
+                    blurRadius: 10,
+                    offset: const Offset(0, 5),
+                  ),
+                ],
+              ),
+              child: Icon(
+                Icons.check_circle_rounded,
+                color: Colors.orange.shade600,
+                size: 35,
+              ),
+            ),
+            const SizedBox(height: 15),
+            const Text(
+              "Tomatoes Detected",
+              style: TextStyle(
+                color: Colors.grey,
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              "$_totalFruits",
+              style: TextStyle(
+                fontSize: 48,
+                color: Colors.orange.shade800,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+
+            if (_harvestStatus != null) ...[
+              const SizedBox(height: 15),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.orange.shade100,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  _harvestStatus!,
+                  style: TextStyle(
+                    color: Colors.orange.shade900,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+              ),
+            ],
+
+            // ----------------------------------------------------
+          ],
+        ),
+      );
+    } else {
+      String formattedStatus =
+          _diseaseStatus?.replaceAll('_', ' ').replaceAll('___', ' ') ??
+          'Unknown';
+      bool isHealthy = formattedStatus.toLowerCase().contains('healthy');
+
+      return Container(
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: isHealthy ? Colors.green.shade50 : Colors.red.shade50,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(
+            color: isHealthy ? Colors.green.shade200 : Colors.red.shade200,
+            width: 2,
+          ),
+        ),
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: (isHealthy ? Colors.green : Colors.red).withOpacity(
+                      0.1,
+                    ),
+                    blurRadius: 10,
+                    offset: const Offset(0, 5),
+                  ),
+                ],
+              ),
+              child: Icon(
+                isHealthy
+                    ? Icons.health_and_safety_rounded
+                    : Icons.warning_rounded,
+                color: isHealthy ? Colors.green.shade600 : Colors.red.shade600,
+                size: 35,
+              ),
+            ),
+            const SizedBox(height: 15),
+            Text(
+              isHealthy ? "Plant is Healthy" : "Disease Detected",
+              style: TextStyle(
+                color: Colors.grey.shade700,
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              formattedStatus,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 22,
+                color: isHealthy ? Colors.green.shade800 : Colors.red.shade800,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 15),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Text(
+                "Accuracy: ${_diseaseConfidence?.toStringAsFixed(1)}%",
+                style: TextStyle(
+                  color: Colors.grey.shade800,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
   }
 }

@@ -46,11 +46,12 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (!userDoc.exists) {
         await _auth.signOut();
-        if (mounted)
+        if (mounted) {
           _showSnackBar(
             'User role data missing. Please contact support.',
             isError: true,
           );
+        }
         return;
       }
 
@@ -72,19 +73,21 @@ class _LoginScreenState extends State<LoginScreen> {
         );
       } else {
         await _auth.signOut();
-        if (mounted)
+        if (mounted) {
           _showSnackBar(
             'Invalid user role assigned. Access denied.',
             isError: true,
           );
+        }
       }
     } catch (e) {
       await _auth.signOut();
-      if (mounted)
+      if (mounted) {
         _showSnackBar(
           'Failed to verify user role: ${e.toString()}',
           isError: true,
         );
+      }
     }
   }
 
@@ -93,8 +96,9 @@ class _LoginScreenState extends State<LoginScreen> {
     final password = _passwordController.text.trim();
 
     if (email.isEmpty || password.isEmpty) {
-      if (mounted)
+      if (mounted) {
         _showSnackBar('Please enter both email and password.', isError: true);
+      }
       return;
     }
 
@@ -112,17 +116,19 @@ class _LoginScreenState extends State<LoginScreen> {
         await _fetchUserRoleAndNavigate(userCredential.user!);
       }
     } on FirebaseAuthException {
-      if (mounted)
+      if (mounted) {
         _showSnackBar(
           'Invalid credentials. Please check your email and password.',
           isError: true,
         );
+      }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         _showSnackBar(
           'An unexpected error occurred during login: ${e.toString()}',
           isError: true,
         );
+      }
     } finally {
       if (!mounted) return;
       setState(() {

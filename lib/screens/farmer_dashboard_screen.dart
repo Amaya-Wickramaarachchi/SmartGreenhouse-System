@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 // --- Import the functional LoginScreen and other tabs ---
-import 'login_screen.dart'; // Make sure this path is correct
+// Make sure this path is correct
 import 'dashboard_tab.dart';
 import 'control_screen.dart' as control;
 import 'diagnosis_screen.dart' as diagnosis;
