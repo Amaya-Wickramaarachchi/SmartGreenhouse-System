@@ -27,6 +27,7 @@ environment:
 # the latest version available on pub.dev. To see which dependencies have newer
 # versions available, run `flutter pub outdated`.
 dependencies:
+  http_parser: 3.2.4
   flutter:
     sdk: flutter
   firebase_core: ^2.31.0
