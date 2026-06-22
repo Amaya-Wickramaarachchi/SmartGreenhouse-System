@@ -37,6 +37,7 @@ dependencies:
   fl_chart: ^0.68.0
   image_picker: ^1.2.1  # Or the latest stable version
   http: ^1.6.0
+  
 
 
   # The following adds the Cupertino Icons font to your application.

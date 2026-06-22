@@ -26,6 +26,11 @@ class _DashboardTabState extends State<DashboardTab> {
   double? _soilMoisture;
   double? _lightLux;
 
+  // --- AI Harvest Data (New) ---
+  int _totalFruits = 0;
+  String _harvestStatus = "Waiting for data...";
+  String _lastHarvestUpdate = "Not scanned yet";
+
   // --- firestore target settings ---
   double? _targetTemp;
   double? _targetHumidity;
@@ -113,19 +118,29 @@ class _DashboardTabState extends State<DashboardTab> {
         _healthColor = Colors.orange;
       });
 
+      // Subscribe to BOTH topics
       client!.subscribe('greenhouse/telemetry', MqttQos.atMostOnce);
+      client!.subscribe('greenhouse/fruit_result', MqttQos.atLeastOnce);
 
       client!.updates!.listen((messages) {
+        final topic =
+            messages[0].topic; // Identify which topic this message came from
         final rec = messages[0].payload as MqttPublishMessage;
         final payload = MqttPublishPayload.bytesToStringAsString(
           rec.payload.message,
         );
-        _parseSensorData(payload);
+
+        // Route the payload to the correct parser
+        if (topic == 'greenhouse/telemetry') {
+          _parseSensorData(payload);
+        } else if (topic == 'greenhouse/fruit_result') {
+          _parseHarvestData(payload);
+        }
       });
     }
   }
 
-  // --- update UI with new mqtt data ---
+  // --- update UI with new sensor data ---
   void _parseSensorData(String payload) {
     try {
       final data = jsonDecode(payload);
@@ -139,6 +154,21 @@ class _DashboardTabState extends State<DashboardTab> {
 
         _updateHealth();
       });
+    } catch (_) {}
+  }
+
+  // --- update UI with new AI harvest data ---
+  void _parseHarvestData(String payload) {
+    try {
+      final data = jsonDecode(payload);
+
+      if (data['analysis_type'] == 'fruit') {
+        setState(() {
+          _totalFruits = data['total_fruits'] ?? 0;
+          _harvestStatus = data['harvest_status'] ?? "Unknown";
+          _lastHarvestUpdate = data['timestamp'] ?? "Unknown time";
+        });
+      }
     } catch (_) {}
   }
 
@@ -207,6 +237,23 @@ class _DashboardTabState extends State<DashboardTab> {
             ),
             const SizedBox(height: 12),
             _buildSensorGrid(), // upgraded cards
+
+            const SizedBox(height: 30),
+
+            // AI Harvest section header
+            const Text(
+              "AI HARVEST ANALYSIS",
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey,
+                letterSpacing: 1.2,
+              ),
+            ),
+            const SizedBox(height: 12),
+            _buildHarvestCard(), // New AI Card integration
+
+            const SizedBox(height: 20),
           ],
         ),
       ),
@@ -425,7 +472,6 @@ class _DashboardTabState extends State<DashboardTab> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          // icon with a soft colored background circle
           Container(
             padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(
@@ -450,9 +496,7 @@ class _DashboardTabState extends State<DashboardTab> {
             textBaseline: TextBaseline.alphabetic,
             children: [
               Text(
-                value != null
-                    ? value.toStringAsFixed(1)
-                    : "--", // nicely formatted numbers
+                value != null ? value.toStringAsFixed(1) : "--",
                 style: const TextStyle(
                   fontWeight: FontWeight.bold,
                   fontSize: 26,
@@ -471,6 +515,136 @@ class _DashboardTabState extends State<DashboardTab> {
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  // --- New AI Harvest Card Widget ---
+  Widget _buildHarvestCard() {
+    Color statusColor = _harvestStatus.toLowerCase().contains("ready")
+        ? Colors.orange.shade800
+        : Colors.green.shade600;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.green.shade100, width: 2),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.grey.withOpacity(0.1),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(20.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      Icons.camera_alt_outlined,
+                      color: Colors.green[700],
+                      size: 22,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      "Edge Vision Result",
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green[900],
+                      ),
+                    ),
+                  ],
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.green.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    "YOLOv8",
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.green.shade800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  "Ready Fruits Detected:",
+                  style: TextStyle(fontSize: 15, color: Colors.black87),
+                ),
+                Text(
+                  "$_totalFruits",
+                  style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  "Harvest Status:",
+                  style: TextStyle(fontSize: 15, color: Colors.black87),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: statusColor.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    _harvestStatus,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: statusColor,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 15),
+            const Divider(),
+            const SizedBox(height: 5),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                const Icon(Icons.sync, size: 14, color: Colors.grey),
+                const SizedBox(width: 5),
+                Text(
+                  "Last scan: $_lastHarvestUpdate",
+                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }

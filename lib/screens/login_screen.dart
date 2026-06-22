@@ -6,7 +6,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'farmer_dashboard_screen.dart';
 import 'admin_configuration_screen.dart';
 
-// Global flag to prevent auto-login blink
+// Global flag to prevent auto-login after registration
 bool isRegisteringProcess = false;
 
 // --- Firebase Instances ---
@@ -24,11 +24,16 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
+  // True = Farmer login mode, False = Admin login mode
   bool isFarmerMode = true;
+
   final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   bool _isLoading = false;
 
+  // ─────────────────────────────────────────────
+  // Show a SnackBar message at the bottom of the screen
+  // ─────────────────────────────────────────────
   void _showSnackBar(String message, {bool isError = false}) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -39,9 +44,140 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  // --- Role Verification ---
+  // ─────────────────────────────────────────────
+  // Displays a "No Permission" alert with red styling and blocks access.
+  // ─────────────────────────────────────────────
+  Future<void> _showNoPermissionDialog() async {
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(15),
+          ),
+          title: const Row(
+            children: [
+              Icon(Icons.block, color: Colors.red, size: 28),
+              SizedBox(width: 10),
+              Text(
+                'No Permission',
+                style: TextStyle(
+                  color: Colors.red,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          content: const Text(
+            'You do not have permission to access the Admin panel.\n\nOnly Admin accounts can log in here.',
+            style: TextStyle(fontSize: 15),
+          ),
+          actions: [
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text(
+                  'OK',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // ─────────────────────────────────────────────
+  // [DIALOG 2] — Shown when an ADMIN tries to log in via FARMER mode.
+  // Returns true  → proceed to Farmer Dashboard
+  // Returns false → cancel, sign out, stay on login screen
+  // ─────────────────────────────────────────────
+  Future<bool> _showAdminAsFarmerConfirmation() async {
+    bool? result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(15),
+          ),
+          title: const Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 28),
+              SizedBox(width: 10),
+              Text(
+                'Confirm Login',
+                style: TextStyle(
+                  color: Colors.orange,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          content: const Text(
+            'Are you sure you want to login to the Farmer Dashboard?\n\nYou are currently logged in as an Admin.',
+            style: TextStyle(fontSize: 15),
+          ),
+          actions: [
+            // NO — cancel and sign out
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              style: TextButton.styleFrom(foregroundColor: Colors.grey),
+              child: const Text(
+                'No, Cancel',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+            // YES — go to Farmer Dashboard
+            ElevatedButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              child: const Text(
+                'Yes, Continue',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    return result ?? false;
+  }
+
+  // ─────────────────────────────────────────────
+  // Fetch user role from Firestore WHILE user is still signed in,
+  // then navigate or show dialog based on role + selected login mode.
+  //
+  // Login Mode | Stored Role | Result
+  // -----------+-------------+--------------------------------------------
+  // Admin UI   | Admin       | ✅ Go to AdminConfigurationScreen
+  // Admin UI   | Farmer      | ❌ Show "No Permission" dialog → sign out
+  // Farmer UI  | Farmer      | ✅ Go to FarmerDashboardScreen
+  // Farmer UI  | Admin       | ⚠️  Show confirmation dialog → Yes/No
+  // ─────────────────────────────────────────────
   Future<void> _fetchUserRoleAndNavigate(User user) async {
     try {
+      // Read Firestore BEFORE any signOut — user is authenticated at this point
       final userDoc = await _firestore.collection('users').doc(user.uid).get();
 
       if (!userDoc.exists) {
@@ -54,18 +190,54 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (!mounted) return;
 
-      if (storedRole == 'Farmer') {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const FarmerDashboardScreen()),
-        );
-      } else if (storedRole == 'Admin') {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const AdminConfigurationScreen()),
-        );
-      } else {
-        await _auth.signOut();
-        if (mounted)
-          _showSnackBar('Invalid role. Access denied.', isError: true);
+      // ── CASE 1: ADMIN login mode selected ──
+      if (!isFarmerMode) {
+        if (storedRole == 'Farmer') {
+          // Farmer trying Admin login → sign out THEN show No Permission dialog
+          await _auth.signOut();
+          if (mounted) await _showNoPermissionDialog();
+        } else if (storedRole == 'Admin') {
+          // Admin → Admin login → ALLOW
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(builder: (_) => const AdminConfigurationScreen()),
+          );
+        } else {
+          await _auth.signOut();
+          if (mounted) {
+            _showSnackBar('Invalid role. Access denied.', isError: true);
+          }
+        }
+      }
+      // ── CASE 2: FARMER login mode selected ──
+      else {
+        if (storedRole == 'Farmer') {
+          // Farmer → Farmer login → ALLOW
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(builder: (_) => const FarmerDashboardScreen()),
+          );
+        } else if (storedRole == 'Admin') {
+          // Admin trying Farmer login → show confirmation dialog
+          bool confirm = await _showAdminAsFarmerConfirmation();
+
+          if (confirm) {
+            // Admin said YES → go to Farmer Dashboard
+            if (mounted) {
+              Navigator.of(context).pushReplacement(
+                MaterialPageRoute(
+                  builder: (_) => const FarmerDashboardScreen(),
+                ),
+              );
+            }
+          } else {
+            // Admin said NO → sign out, stay on login screen
+            await _auth.signOut();
+          }
+        } else {
+          await _auth.signOut();
+          if (mounted) {
+            _showSnackBar('Invalid role. Access denied.', isError: true);
+          }
+        }
       }
     } catch (e) {
       await _auth.signOut();
@@ -73,7 +245,10 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  // --- Login Handler ---
+  // ─────────────────────────────────────────────
+  // Handle LOGIN button press.
+  // Validates input → Firebase sign-in → role check → navigate.
+  // ─────────────────────────────────────────────
   Future<void> _handleLogin() async {
     final email = _usernameController.text.trim();
     final password = _passwordController.text.trim();
@@ -87,11 +262,14 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _isLoading = true);
 
     try {
+      // Step 1: Firebase sign-in
       final userCredential = await _auth.signInWithEmailAndPassword(
         email: email,
         password: password,
       );
+
       if (userCredential.user != null) {
+        // Step 2: Immediately fetch role while user is still authenticated
         await _fetchUserRoleAndNavigate(userCredential.user!);
       }
     } on FirebaseAuthException {
@@ -103,8 +281,11 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  // --- Registration Handler ---
-  // --- Registration Handler ---
+  // ─────────────────────────────────────────────
+  // Show the Registration dialog.
+  // Role is auto-assigned from current login mode.
+  // Signs out after registration to prevent auto-login.
+  // ─────────────────────────────────────────────
   void _showRegistrationDialog() {
     final TextEditingController regEmailController = TextEditingController();
     final TextEditingController regPasswordController = TextEditingController();
@@ -125,6 +306,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 _showSnackBar('Passwords do not match.', isError: true);
                 return;
               }
+
               if (regPasswordController.text.length < 6) {
                 _showSnackBar(
                   'Password must be at least 6 characters.',
@@ -133,7 +315,6 @@ class _LoginScreenState extends State<LoginScreen> {
                 return;
               }
 
-              // Show custom loading animation
               setState(() => isRegistering = true);
               isRegisteringProcess = true;
 
@@ -142,33 +323,33 @@ class _LoginScreenState extends State<LoginScreen> {
               final role = isFarmerMode ? 'Farmer' : 'Admin';
 
               try {
-                // Create user
+                // Step 1: Create Firebase Auth account
                 final userCredential = await _auth
                     .createUserWithEmailAndPassword(
                       email: email,
                       password: password,
                     );
 
-                // Save role to Firestore
+                // Step 2: Store role in Firestore while authenticated
                 await _firestore
                     .collection('users')
                     .doc(userCredential.user!.uid)
                     .set({'email': email, 'role': role});
 
-                // Prevent auto-login
+                // Step 3: Sign out to prevent auto-login
                 await _auth.signOut();
                 isRegisteringProcess = false;
 
-                // Close registration dialog
+                // Step 4: Close the registration dialog
                 if (dialogContext.mounted) {
                   Navigator.of(dialogContext).pop();
                 }
 
-                // Show success alert
+                // Step 5: Show success alert
                 if (mounted) {
                   showDialog(
                     context: context,
-                    barrierDismissible: false, // Force OK click
+                    barrierDismissible: false,
                     builder: (BuildContext alertContext) {
                       return AlertDialog(
                         shape: RoundedRectangleBorder(
@@ -226,15 +407,11 @@ class _LoginScreenState extends State<LoginScreen> {
                   e.message ?? 'Registration failed.',
                   isError: true,
                 );
-                setState(
-                  () => isRegistering = false,
-                ); // Show form again on error
+                setState(() => isRegistering = false);
               } catch (e) {
                 isRegisteringProcess = false;
                 _showSnackBar('Unexpected error occurred.', isError: true);
-                setState(
-                  () => isRegistering = false,
-                ); // Show form again on error
+                setState(() => isRegistering = false);
               }
             }
 
@@ -242,15 +419,12 @@ class _LoginScreenState extends State<LoginScreen> {
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(15),
               ),
-              // Hide title while loading
               title: isRegistering
                   ? null
                   : Text('Register as ${isFarmerMode ? "Farmer" : "Admin"}'),
-              // AnimatedSwitcher gives a smooth fade effect
               content: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 300),
                 child: isRegistering
-                    // --- Loading UI with Leaf Icon ---
                     ? const Padding(
                         padding: EdgeInsets.symmetric(vertical: 40.0),
                         child: Column(
@@ -276,7 +450,6 @@ class _LoginScreenState extends State<LoginScreen> {
                           ],
                         ),
                       )
-                    // --- Registration Form UI ---
                     : SingleChildScrollView(
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
@@ -308,7 +481,6 @@ class _LoginScreenState extends State<LoginScreen> {
                         ),
                       ),
               ),
-              // Hide action buttons while loading
               actions: isRegistering
                   ? []
                   : [
@@ -334,7 +506,7 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  // --- UI Helpers ---
+  // Builds the Farmer/Admin toggle mode button
   Widget _buildModeButton({
     required String label,
     required IconData icon,
@@ -342,8 +514,8 @@ class _LoginScreenState extends State<LoginScreen> {
     required Color activeColor,
     required VoidCallback onTap,
   }) {
-    Color foregroundColor = isActive ? Colors.white : activeColor;
-    Color backgroundColor = isActive ? activeColor : Colors.white;
+    final Color foregroundColor = isActive ? Colors.white : activeColor;
+    final Color backgroundColor = isActive ? activeColor : Colors.white;
 
     return Expanded(
       child: ElevatedButton.icon(
@@ -366,6 +538,7 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  // Reusable text field decoration
   InputDecoration _inputDecoration({
     required String hint,
     required IconData icon,
@@ -404,8 +577,12 @@ class _LoginScreenState extends State<LoginScreen> {
             mainAxisAlignment: MainAxisAlignment.center,
             children: <Widget>[
               SizedBox(height: screenHeight * 0.1),
+
+              // App logo
               Image.asset('assets/smartgreen_logo.png', height: 80, width: 80),
               const SizedBox(height: 10),
+
+              // App name
               const Text(
                 'SmartGreen',
                 style: TextStyle(
@@ -414,8 +591,10 @@ class _LoginScreenState extends State<LoginScreen> {
                   color: Colors.black87,
                 ),
               ),
+
               SizedBox(height: screenHeight * 0.05),
 
+              // Login mode toggle: Farmer | Admin
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -439,6 +618,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
               SizedBox(height: screenHeight * 0.05),
 
+              // Email input
               TextField(
                 controller: _usernameController,
                 keyboardType: TextInputType.emailAddress,
@@ -449,6 +629,7 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               const SizedBox(height: 20),
 
+              // Password input
               TextField(
                 controller: _passwordController,
                 obscureText: true,
@@ -460,6 +641,7 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               const SizedBox(height: 30),
 
+              // Login button
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
@@ -489,6 +671,7 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               const SizedBox(height: 20),
 
+              // Registration link
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
