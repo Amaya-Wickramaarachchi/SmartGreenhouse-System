@@ -29,7 +29,6 @@ class _DashboardTabState extends State<DashboardTab> {
   // --- AI Harvest Data ---
   int _totalFruits = 0;
   String _harvestStatus = "Waiting for data...";
-  String _lastHarvestUpdate = "Not scanned yet";
 
   // --- Firestore Targets ---
   double? _targetSoilTemp; // Firestore: targetSoilTemp
@@ -207,7 +206,6 @@ class _DashboardTabState extends State<DashboardTab> {
         setState(() {
           _totalFruits = data['total_fruits'] ?? 0;
           _harvestStatus = data['harvest_status'] ?? "Unknown";
-          _lastHarvestUpdate = data['timestamp'] ?? "Unknown time";
         });
       }
     } catch (e) {
