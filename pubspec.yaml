@@ -83,8 +83,7 @@ flutter:
     - assets/animations/splash_animation.json
     - assets/smartgreen_logo.png
     - assets/icon/app_icon.png
-    - .env
-
+    
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images
 
