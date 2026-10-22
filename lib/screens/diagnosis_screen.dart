@@ -1,7 +1,10 @@
+// Import flutter_dotenv to securely load environment variables (e.g., API URLs)
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter/material.dart';
 import 'dart:io';
 import 'dart:convert';
 import 'package:image_picker/image_picker.dart';
+// Import http package for handling API requests to the AI backend
 import 'package:http/http.dart' as http;
 
 class DiagnosisScreen extends StatefulWidget {
@@ -12,52 +15,69 @@ class DiagnosisScreen extends StatefulWidget {
 }
 
 class _DiagnosisScreenState extends State<DiagnosisScreen> {
-  File? _image;
-  final ImagePicker _picker = ImagePicker();
-  bool _isLoading = false;
+  // --- Core State Variables ---
+  File? _image; // Holds the currently selected image file
+  final ImagePicker _picker =
+      ImagePicker(); // Utility to pick images from camera or gallery
+  bool _isLoading = false; // Controls the loading spinner during the API call
 
-  // ML Results State
+  // --- ML Results State (Leaf Analysis) ---
   String? _diseaseStatus;
   double? _diseaseConfidence;
+  bool? _isHealthy;
+  String? _treatment;
+
+  // --- ML Results State (Fruit Analysis) ---
   int? _totalFruits;
   String? _harvestStatus;
 
-  // Scan Type State ('leaf' or 'fruit')
+  // Scan Type State ('leaf' for disease detection or 'fruit' for harvest counting)
   String _scanType = 'leaf';
 
-  final String apiUrl = "https://dasunz-tomato-disease-api.hf.space/analyze";
+  // Securely fetch the AI backend API URL from the .env file
+  // This prevents the URL from being hardcoded and exposed in the source code
+  String get apiUrl => dotenv.env['AI_API_URL']!;
 
+  // Clears all previously fetched results before starting a new analysis
   void _clearResults() {
     _diseaseStatus = null;
     _diseaseConfidence = null;
+    _isHealthy = null;
+    _treatment = null;
     _totalFruits = null;
     _harvestStatus = null;
   }
 
+  // Opens the camera or gallery for the user to select an image
   Future<void> _pickImage(ImageSource source) async {
     final pickedFile = await _picker.pickImage(source: source);
     if (pickedFile != null) {
       setState(() {
         _image = File(pickedFile.path);
-        _clearResults();
+        _clearResults(); // Reset UI when a new image is selected
       });
     }
   }
 
+  // --- Core AI Integration Logic ---
+  // Sends the selected image to the HuggingFace backend and processes the results
   Future<void> _analyzeImage() async {
-    if (_image == null) return;
+    if (_image == null) return; // Prevent analysis if no image is selected
 
     setState(() {
-      _isLoading = true;
+      _isLoading = true; // Show loading indicator
     });
 
     try {
+      // Prepare a multipart POST request to send the image file
       var request = http.MultipartRequest('POST', Uri.parse(apiUrl));
-      request.fields['scan_type'] = _scanType;
+      request.fields['scan_type'] =
+          _scanType; // Tell backend what we are scanning
       request.files.add(
         await http.MultipartFile.fromPath('file', _image!.path),
       );
 
+      // Send the request with a 60-second timeout to handle backend "cold starts"
       var streamedResponse = await request.send().timeout(
         const Duration(seconds: 60),
         onTimeout: () => throw Exception("Server Timeout: Model is waking up."),
@@ -65,20 +85,32 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
 
       var response = await http.Response.fromStream(streamedResponse);
 
+      // If the API call is successful (HTTP 200)
       if (response.statusCode == 200) {
         var jsonResult = jsonDecode(response.body);
 
         if (jsonResult.containsKey('error')) {
           _showErrorDialog(jsonResult['error']);
         } else {
+          // Update the UI with the processed AI data
           setState(() {
             if (_scanType == 'leaf') {
+              // Parse leaf disease data
               _diseaseStatus = jsonResult['status'];
               String confStr =
                   jsonResult['confidence']?.toString().replaceAll('%', '') ??
                   '0';
               _diseaseConfidence = double.tryParse(confStr) ?? 0.0;
+
+              // Parse boolean status and treatment plan if available
+              if (jsonResult.containsKey('is_healthy')) {
+                _isHealthy = jsonResult['is_healthy'];
+              }
+              if (jsonResult.containsKey('treatment')) {
+                _treatment = jsonResult['treatment'];
+              }
             } else if (_scanType == 'fruit') {
+              // Parse fruit counting data
               _totalFruits = jsonResult['total_fruits'];
               _harvestStatus = jsonResult['harvest_status'];
             }
@@ -88,18 +120,21 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
         _showErrorDialog("Backend Error: ${response.statusCode}");
       }
     } catch (e) {
+      // Provide user-friendly error messages based on the exception type
       _showErrorDialog(
         e.toString().contains('Timeout')
             ? "Server is waking up. Please wait and try again."
             : "Failed to connect. Please check your internet.",
       );
     } finally {
+      // Hide loading indicator regardless of success or failure
       setState(() {
         _isLoading = false;
       });
     }
   }
 
+  // Displays a generic error popup for API failures or network issues
   void _showErrorDialog(String message) {
     showDialog(
       context: context,
@@ -150,7 +185,7 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // --- Modern Segmented Toggle (Apple iOS Style) ---
+            // --- Modern Segmented Toggle for Scan Type (Leaf vs Fruit) ---
             Container(
               padding: const EdgeInsets.all(4),
               decoration: BoxDecoration(
@@ -241,6 +276,7 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
             const SizedBox(height: 30),
 
             // --- Modern Image Upload Container ---
+            // Displays the selected image or a placeholder icon
             Container(
               height: 280,
               decoration: BoxDecoration(
@@ -306,7 +342,7 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
             ),
             const SizedBox(height: 25),
 
-            // --- Sleek Camera & Gallery Buttons ---
+            // --- Sleek Camera & Gallery Action Buttons ---
             Row(
               children: [
                 Expanded(
@@ -361,6 +397,7 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
             const SizedBox(height: 35),
 
             // --- Modern Gradient Analyze Button ---
+            // Disabled if no image is selected or if an API call is currently running
             Container(
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(20),
@@ -413,7 +450,7 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
             ),
             const SizedBox(height: 30),
 
-            // --- Results Section ---
+            // --- Dynamic Results Display Section ---
             if (_diseaseStatus != null || _totalFruits != null)
               _buildModernResultCard(),
             const SizedBox(height: 30),
@@ -423,8 +460,9 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
     );
   }
 
-  // --- Modern UI Component for Results ---
+  // --- Modern UI Component for Displaying AI Results ---
   Widget _buildModernResultCard() {
+    // 1. Result layout for Fruit Count & Harvest Status
     if (_scanType == 'fruit') {
       return Container(
         padding: const EdgeInsets.all(24),
@@ -472,7 +510,6 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
                 fontWeight: FontWeight.w900,
               ),
             ),
-
             if (_harvestStatus != null) ...[
               const SizedBox(height: 15),
               Container(
@@ -494,16 +531,14 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
                 ),
               ),
             ],
-
-            // ----------------------------------------------------
           ],
         ),
       );
     } else {
+      // 2. Result layout for Leaf Disease & Treatment Plan
+      bool isHealthy = _isHealthy ?? false;
       String formattedStatus =
-          _diseaseStatus?.replaceAll('_', ' ').replaceAll('___', ' ') ??
-          'Unknown';
-      bool isHealthy = formattedStatus.toLowerCase().contains('healthy');
+          _diseaseStatus?.replaceAll('_', ' ') ?? 'Unknown';
 
       return Container(
         padding: const EdgeInsets.all(24),
@@ -517,6 +552,7 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
         ),
         child: Column(
           children: [
+            // Status Icon Indicator
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
@@ -550,6 +586,7 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
               ),
             ),
             const SizedBox(height: 5),
+            // Formatted Disease Name
             Text(
               formattedStatus,
               textAlign: TextAlign.center,
@@ -560,6 +597,7 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
               ),
             ),
             const SizedBox(height: 15),
+            // AI Confidence Score
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: BoxDecoration(
@@ -574,6 +612,62 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
                 ),
               ),
             ),
+
+            // --- Integrated Treatment Plan Section ---
+            // Only displayed if the plant is sick and a treatment is provided by the API
+            if (!isHealthy && _treatment != null && _treatment!.isNotEmpty) ...[
+              const SizedBox(height: 25),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.red.shade100, width: 1.5),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.red.withOpacity(0.05),
+                      blurRadius: 5,
+                      offset: const Offset(0, 3),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.medical_information_outlined,
+                          color: Colors.red.shade700,
+                          size: 22,
+                        ),
+                        const SizedBox(width: 10),
+                        Text(
+                          "Treatment Plan",
+                          style: TextStyle(
+                            color: Colors.red.shade900,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      _treatment!,
+                      style: TextStyle(
+                        color: Colors.grey.shade800,
+                        fontSize: 14,
+                        height: 1.5,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            // ------------------------------------------
           ],
         ),
       );

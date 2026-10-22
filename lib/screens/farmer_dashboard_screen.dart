@@ -81,23 +81,31 @@ class _FarmerDashboardScreenState extends State<FarmerDashboardScreen> {
             onPressed: () async {
               try {
                 await FirebaseAuth.instance.signOut();
-                // No need for Navigator.push; StreamBuilder in main.dart handles redirection
+                if (context.mounted) {
+                  Navigator.of(context).pushAndRemoveUntil(
+                    MaterialPageRoute(
+                      builder: (context) => const LoginScreen(),
+                    ),
+                    (Route<dynamic> route) => false,
+                  );
+                }
               } catch (e) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('Failed to logout: ${e.toString()}'),
-                    backgroundColor: Colors.red,
-                    duration: const Duration(seconds: 3),
-                  ),
-                );
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Failed to logout: ${e.toString()}'),
+                      backgroundColor: Colors.red,
+                      duration: const Duration(seconds: 3),
+                    ),
+                  );
+                }
               }
             },
           ),
         ],
       ),
 
-      // Display the currently selected screen
-      body: _widgetOptions.elementAt(_selectedIndex),
+      body: IndexedStack(index: _selectedIndex, children: _widgetOptions),
 
       // Bottom navigation bar for tab switching
       bottomNavigationBar: BottomNavigationBar(

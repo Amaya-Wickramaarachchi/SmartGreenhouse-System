@@ -34,7 +34,7 @@ migrate_working_dir/
 /coverage/
 **/doc/api/
 **/ios/Flutter/.last_build_id
-/pubspec.lock               # UNCOMMENT THIS LINE if you prefer to let developers
+# /pubspec.lock              # UNCOMMENT THIS LINE if you prefer to let developers
                             # use their own pub versions, but keep it for consistent builds.
 
 # === ANDROID SPECIFIC (Native Build Caches) ===
@@ -60,3 +60,8 @@ migrate_working_dir/
 /lib/firebase_options.g.dart # Generated Firebase options file
 /ios/Runner/GoogleService-Info.plist # iOS configuration file
 /android/app/google-services.json # Android configuration file
+
+# === ENVIRONMENT VARIABLES & SECRETS ===
+.env
+.env.*
+!.env.example

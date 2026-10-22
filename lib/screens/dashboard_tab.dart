@@ -15,31 +15,45 @@ class DashboardTab extends StatefulWidget {
 class _DashboardTabState extends State<DashboardTab> {
   MqttServerClient? client;
 
-  // --- clock state ---
+  // --- Clock State ---
   String _currentTime = '';
   Timer? _clockTimer;
 
-  // --- live sensor data ---
+  // --- Live Sensor Data ---
   double? _temp1;
   double? _temp2;
   double? _humidity;
   double? _soilMoisture;
   double? _lightLux;
 
-  // --- AI Harvest Data (New) ---
+  // --- AI Harvest Data ---
   int _totalFruits = 0;
   String _harvestStatus = "Waiting for data...";
   String _lastHarvestUpdate = "Not scanned yet";
 
-  // --- firestore target settings ---
-  double? _targetTemp;
+  // --- Firestore Targets ---
+  double? _targetSoilTemp; // Firestore: targetSoilTemp
+  double? _targetAirTemp; // Firestore: targetTemp (air)
   double? _targetHumidity;
   double? _targetMoisture;
   double? _targetLight;
 
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  // --- Firestore Automation Schedule ---
+  int? _numberOfPlants;
+  int? _fertilityFreqDays;
+  int? _cameraIntervalHours;
 
-  // --- system health state ---
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _configSub;
+
+  // --- Alert tolerances (alert fires when live value drifts past target +/- tolerance) ---
+  static const double _tempTolerance = 2.0; // °C above target
+  static const double _humidityTolerance = 15.0; // % either side
+  static const double _moistureTolerance = 10.0; // % below target
+
+  // --- System Mode ---
+  String _systemMode = "AUTO"; // Default Mode
+
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   String _healthStatus = 'CONNECTING...';
   Color _healthColor = Colors.orange;
 
@@ -51,157 +65,216 @@ class _DashboardTabState extends State<DashboardTab> {
     _listenToConfiguration();
   }
 
-  // --- clock logic ---
   void _startClock() {
     _updateTime();
-    _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      _updateTime();
-    });
+    _clockTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _updateTime(),
+    );
   }
 
   void _updateTime() {
     final now = DateTime.now();
-    setState(() {
-      _currentTime =
-          "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}  "
-          "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
-    });
+    if (mounted) {
+      setState(() {
+        _currentTime =
+            "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}  "
+            "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
+      });
+    }
   }
 
-  // --- fetch targets from firestore ---
   void _listenToConfiguration() {
-    _firestore.collection('configuration').doc('settings').snapshots().listen((
-      doc,
-    ) {
-      if (doc.exists) {
-        final data = doc.data();
-        setState(() {
-          _targetTemp = (data?['targetTemp'] as num?)?.toDouble();
-          _targetHumidity = (data?['targetHumid'] as num?)?.toDouble();
-          _targetMoisture = (data?['targetMoist'] as num?)?.toDouble();
-          _targetLight = (data?['targetLight'] as num?)?.toDouble();
-        });
-      }
-    });
+    _configSub = _firestore
+        .collection('configuration')
+        .doc('settings')
+        .snapshots()
+        .listen((doc) {
+          if (doc.exists && mounted) {
+            final data = doc.data();
+            setState(() {
+              _targetSoilTemp = (data?['targetSoilTemp'] as num?)?.toDouble();
+              _targetAirTemp = (data?['targetTemp'] as num?)?.toDouble();
+              _targetHumidity = (data?['targetHumid'] as num?)?.toDouble();
+              _targetMoisture = (data?['targetMoist'] as num?)?.toDouble();
+              _targetLight = (data?['targetLight'] as num?)?.toDouble();
+
+              _numberOfPlants = (data?['numberOfPlants'] as num?)?.toInt();
+              _fertilityFreqDays = (data?['fertilityFreqDays'] as num?)
+                  ?.toInt();
+              _cameraIntervalHours = (data?['cameraIntervalHours'] as num?)
+                  ?.toInt();
+
+              // Targets changed -> re-evaluate health immediately
+              _updateHealth();
+            });
+          }
+        }, onError: (e) => debugPrint('Config listener error: $e'));
   }
 
-  // --- connect to hivemq broker ---
   Future<void> _setupMqttConnection() async {
+    // Client ID එකට _dash කෑල්ලක් දැම්මා, Control screen එකත් එක්ක පැටලෙන්නේ නැති වෙන්න
     client = MqttServerClient.withPort(
       'c0eacb6e24dd4984814b3e19f4daa7a4.s1.eu.hivemq.cloud',
-      'flutter_mobile_${DateTime.now().millisecondsSinceEpoch}',
+      'flutter_dash_${DateTime.now().millisecondsSinceEpoch}',
       8883,
     );
 
     client!.secure = true;
     client!.logging(on: false);
-    client!.keepAlivePeriod = 20;
-
+    client!.keepAlivePeriod = 60;
     client!.connectionMessage = MqttConnectMessage()
-        .withClientIdentifier('flutter_mobile')
+        .withClientIdentifier(
+          'flutter_dash_${DateTime.now().millisecondsSinceEpoch}',
+        )
         .authenticateAs('greenhouse_admin', 'Admin@123');
 
     try {
       await client!.connect();
     } catch (e) {
-      client!.disconnect();
-      setState(() {
-        _healthStatus = 'CONNECTION ERROR';
-        _healthColor = Colors.red;
-      });
+      if (mounted)
+        setState(() {
+          _healthStatus = 'CONNECTION ERROR';
+          _healthColor = Colors.red;
+        });
       return;
     }
 
     if (client!.connectionStatus!.state == MqttConnectionState.connected) {
-      setState(() {
-        _healthStatus = 'WAITING FOR DATA';
-        _healthColor = Colors.orange;
-      });
+      if (mounted)
+        setState(() {
+          _healthStatus = 'WAITING FOR DATA';
+          _healthColor = Colors.orange;
+        });
 
-      // Subscribe to BOTH topics
       client!.subscribe('greenhouse/telemetry', MqttQos.atMostOnce);
       client!.subscribe('greenhouse/fruit_result', MqttQos.atLeastOnce);
+      client!.subscribe(
+        'greenhouse/mode',
+        MqttQos.atMostOnce,
+      ); // Mode එක අහගෙන ඉන්නවා
 
       client!.updates!.listen((messages) {
-        final topic =
-            messages[0].topic; // Identify which topic this message came from
-        final rec = messages[0].payload as MqttPublishMessage;
+        final topic = messages[0].topic;
         final payload = MqttPublishPayload.bytesToStringAsString(
-          rec.payload.message,
+          (messages[0].payload as MqttPublishMessage).payload.message,
         );
 
-        // Route the payload to the correct parser
         if (topic == 'greenhouse/telemetry') {
           _parseSensorData(payload);
         } else if (topic == 'greenhouse/fruit_result') {
           _parseHarvestData(payload);
+        } else if (topic == 'greenhouse/mode') {
+          _parseMode(payload);
         }
       });
     }
   }
 
-  // --- update UI with new sensor data ---
+  void _parseMode(String payload) {
+    try {
+      final data = jsonDecode(payload);
+      if (mounted && data.containsKey('mode')) {
+        setState(() => _systemMode = data['mode'].toString().toUpperCase());
+      }
+    } catch (e) {
+      print("Mode Parse Error: $e");
+    }
+  }
+
   void _parseSensorData(String payload) {
     try {
       final data = jsonDecode(payload);
-
-      setState(() {
-        _temp1 = (data['temperature_1'] as num?)?.toDouble();
-        _temp2 = (data['temperature_2'] as num?)?.toDouble();
-        _humidity = (data['humidity'] as num?)?.toDouble();
-        _soilMoisture = (data['soil_moisture'] as num?)?.toDouble();
-        _lightLux = (data['light_lux'] as num?)?.toDouble();
-
-        _updateHealth();
-      });
-    } catch (_) {}
+      if (mounted) {
+        setState(() {
+          _temp1 = (data['temperature_1'] as num?)?.toDouble();
+          _temp2 = (data['temperature_2'] as num?)?.toDouble();
+          _humidity = (data['humidity'] as num?)?.toDouble();
+          _soilMoisture = (data['soil_moisture'] as num?)?.toDouble();
+          _lightLux = (data['light_lux'] as num?)?.toDouble();
+          _updateHealth();
+        });
+      }
+    } catch (e) {
+      print("Telemetry JSON Error: $e");
+    }
   }
 
-  // --- update UI with new AI harvest data ---
   void _parseHarvestData(String payload) {
     try {
       final data = jsonDecode(payload);
-
-      if (data['analysis_type'] == 'fruit') {
+      if (data['analysis_type'] == 'fruit' && mounted) {
         setState(() {
           _totalFruits = data['total_fruits'] ?? 0;
           _harvestStatus = data['harvest_status'] ?? "Unknown";
           _lastHarvestUpdate = data['timestamp'] ?? "Unknown time";
         });
       }
-    } catch (_) {}
+    } catch (e) {
+      print("Harvest JSON Error: $e");
+    }
   }
 
-  // --- simple edge logic evaluation for UI ---
+  bool _tooHigh(double? value, double? target, double tol) =>
+      value != null && target != null && value > target + tol;
+
+  bool _tooLow(double? value, double? target, double tol) =>
+      value != null && target != null && value < target - tol;
+
+  bool _outOfBand(double? value, double? target, double tol) =>
+      _tooHigh(value, target, tol) || _tooLow(value, target, tol);
+
   void _updateHealth() {
-    if (_temp1 == null || _soilMoisture == null) {
+    if (_temp1 == null ||
+        _temp2 == null ||
+        _humidity == null ||
+        _soilMoisture == null) {
       _healthStatus = 'WAITING FOR DATA';
       _healthColor = Colors.orange;
-    } else if (_temp1! > 32) {
-      _healthStatus = 'HIGH TEMP ALERT';
-      _healthColor = Colors.red;
-    } else if (_soilMoisture! < 40) {
-      _healthStatus = 'LOW MOISTURE ALERT';
-      _healthColor = Colors.amber.shade800;
-    } else {
+      return;
+    }
+
+    final alerts = <String>[];
+    bool critical = false;
+
+    if (_tooHigh(_temp2, _targetAirTemp, _tempTolerance)) {
+      alerts.add('HIGH AIR TEMP');
+      critical = true;
+    }
+    if (_tooHigh(_temp1, _targetSoilTemp, _tempTolerance)) {
+      alerts.add('HIGH SOIL TEMP');
+      critical = true;
+    }
+    if (_tooLow(_soilMoisture, _targetMoisture, _moistureTolerance)) {
+      alerts.add('LOW MOISTURE');
+    }
+    if (_outOfBand(_humidity, _targetHumidity, _humidityTolerance)) {
+      alerts.add('HUMIDITY OFF TARGET');
+    }
+
+    if (alerts.isEmpty) {
       _healthStatus = 'SYSTEM OPTIMAL';
       _healthColor = Colors.green;
+    } else {
+      _healthStatus = alerts.length == 1
+          ? '${alerts.first} ALERT'
+          : '${alerts.first} +${alerts.length - 1} MORE';
+      _healthColor = critical ? Colors.red : Colors.amber.shade800;
     }
   }
 
   @override
   void dispose() {
     client?.disconnect();
+    _configSub?.cancel();
     _clockTimer?.cancel();
     super.dispose();
   }
 
-  // ================= UI BUILD =================
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey.shade50, // clean off-white background
+      backgroundColor: Colors.grey.shade50,
       body: SingleChildScrollView(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
         child: Column(
@@ -210,7 +283,6 @@ class _DashboardTabState extends State<DashboardTab> {
             _buildHeader(),
             const SizedBox(height: 25),
 
-            // targets section header
             const Text(
               "CONFIGURED TARGETS",
               style: TextStyle(
@@ -221,11 +293,22 @@ class _DashboardTabState extends State<DashboardTab> {
               ),
             ),
             const SizedBox(height: 12),
-            _buildTargetRow(), // much prettier targets UI
-
+            _buildTargetRow(),
             const SizedBox(height: 30),
 
-            // live telemetry header
+            const Text(
+              "AUTOMATION SCHEDULE",
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey,
+                letterSpacing: 1.2,
+              ),
+            ),
+            const SizedBox(height: 12),
+            _buildScheduleRow(),
+            const SizedBox(height: 30),
+
             const Text(
               "LIVE TELEMETRY",
               style: TextStyle(
@@ -236,11 +319,9 @@ class _DashboardTabState extends State<DashboardTab> {
               ),
             ),
             const SizedBox(height: 12),
-            _buildSensorGrid(), // upgraded cards
-
+            _buildSensorGrid(),
             const SizedBox(height: 30),
 
-            // AI Harvest section header
             const Text(
               "AI HARVEST ANALYSIS",
               style: TextStyle(
@@ -251,8 +332,7 @@ class _DashboardTabState extends State<DashboardTab> {
               ),
             ),
             const SizedBox(height: 12),
-            _buildHarvestCard(), // New AI Card integration
-
+            _buildHarvestCard(),
             const SizedBox(height: 20),
           ],
         ),
@@ -260,12 +340,11 @@ class _DashboardTabState extends State<DashboardTab> {
     );
   }
 
-  // --- top status bar ---
   Widget _buildHeader() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
       decoration: BoxDecoration(
-        color: _healthColor, // dynamically changes color based on health
+        color: _healthColor,
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
@@ -300,26 +379,52 @@ class _DashboardTabState extends State<DashboardTab> {
               ),
             ],
           ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.2),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Text(
-              _currentTime.split('  ')[1], // show only time in the pill
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
+                decoration: BoxDecoration(
+                  color: _systemMode == "AUTO"
+                      ? Colors.green.shade800
+                      : Colors.orange.shade800,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  "MODE: $_systemMode",
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
               ),
-            ),
+              const SizedBox(height: 8),
+              Text(
+                _currentTime.split('  ').length > 1
+                    ? _currentTime.split('  ')[1]
+                    : '',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
           ),
         ],
       ),
     );
   }
 
-  // --- modern horizontally scrolling targets ---
+  String _fmtNum(double? v) {
+    if (v == null) return "--";
+    return v == v.roundToDouble() ? v.toInt().toString() : v.toStringAsFixed(1);
+  }
+
   Widget _buildTargetRow() {
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
@@ -328,10 +433,17 @@ class _DashboardTabState extends State<DashboardTab> {
         children: [
           _targetPill(
             Icons.thermostat,
-            "Temp",
-            _targetTemp,
+            "Soil Temp",
+            _targetSoilTemp,
             "°C",
             Colors.orange,
+          ),
+          _targetPill(
+            Icons.device_thermostat,
+            "Air Temp",
+            _targetAirTemp,
+            "°C",
+            Colors.deepOrange,
           ),
           _targetPill(
             Icons.water_drop,
@@ -359,7 +471,38 @@ class _DashboardTabState extends State<DashboardTab> {
     );
   }
 
-  // --- ui template for a single target pill ---
+  Widget _buildScheduleRow() {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      physics: const BouncingScrollPhysics(),
+      child: Row(
+        children: [
+          _targetPill(
+            Icons.eco,
+            "Plants",
+            _numberOfPlants?.toDouble(),
+            "",
+            Colors.green,
+          ),
+          _targetPill(
+            Icons.science,
+            "Fertilize every",
+            _fertilityFreqDays?.toDouble(),
+            " days",
+            Colors.purple,
+          ),
+          _targetPill(
+            Icons.camera_alt,
+            "Photo every",
+            _cameraIntervalHours?.toDouble(),
+            " h",
+            Colors.teal,
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _targetPill(
     IconData icon,
     String title,
@@ -372,15 +515,8 @@ class _DashboardTabState extends State<DashboardTab> {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(30), // round pill shape
+        borderRadius: BorderRadius.circular(30),
         border: Border.all(color: Colors.grey.shade200),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.grey.withOpacity(0.05),
-            blurRadius: 5,
-            offset: const Offset(0, 2),
-          ),
-        ],
       ),
       child: Row(
         children: [
@@ -394,7 +530,7 @@ class _DashboardTabState extends State<DashboardTab> {
             ),
           ),
           Text(
-            value != null ? "$value$unit" : "--",
+            value != null ? "${_fmtNum(value)}$unit" : "--",
             style: const TextStyle(
               fontWeight: FontWeight.bold,
               color: Colors.black87,
@@ -405,38 +541,50 @@ class _DashboardTabState extends State<DashboardTab> {
     );
   }
 
-  // --- grid for live data ---
   Widget _buildSensorGrid() {
     return GridView.count(
       shrinkWrap: true,
-      physics:
-          const NeverScrollableScrollPhysics(), // scrolling handled by main view
+      physics: const NeverScrollableScrollPhysics(),
       crossAxisCount: 2,
       crossAxisSpacing: 16,
       mainAxisSpacing: 16,
-      childAspectRatio: 1.1, // make cards slightly taller
+      childAspectRatio: 1.0,
       children: [
         _sensorCard(
-          "Temperature 1",
+          "Soil Temp",
           _temp1,
           "°C",
           Icons.thermostat,
           Colors.orange,
+          target: _targetSoilTemp,
+          alert: _tooHigh(_temp1, _targetSoilTemp, _tempTolerance),
         ),
         _sensorCard(
-          "Temperature 2",
+          "Air Temp",
           _temp2,
           "°C",
           Icons.device_thermostat,
           Colors.deepOrange,
+          target: _targetAirTemp,
+          alert: _tooHigh(_temp2, _targetAirTemp, _tempTolerance),
         ),
-        _sensorCard("Humidity", _humidity, "%", Icons.water_drop, Colors.blue),
+        _sensorCard(
+          "Humidity",
+          _humidity,
+          "%",
+          Icons.water_drop,
+          Colors.blue,
+          target: _targetHumidity,
+          alert: _outOfBand(_humidity, _targetHumidity, _humidityTolerance),
+        ),
         _sensorCard(
           "Soil Moisture",
           _soilMoisture,
           "%",
           Icons.grass,
           Colors.brown,
+          target: _targetMoisture,
+          alert: _tooLow(_soilMoisture, _targetMoisture, _moistureTolerance),
         ),
         _sensorCard(
           "Light Level",
@@ -444,26 +592,29 @@ class _DashboardTabState extends State<DashboardTab> {
           "Lux",
           Icons.wb_sunny,
           Colors.amber,
+          target: _targetLight,
         ),
       ],
     );
   }
 
-  // --- ui template for live sensor cards ---
   Widget _sensorCard(
     String title,
     double? value,
     String unit,
     IconData icon,
-    Color iconColor,
-  ) {
+    Color iconColor, {
+    double? target,
+    bool alert = false,
+  }) {
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
+        border: alert ? Border.all(color: Colors.red.shade300, width: 2) : null,
         boxShadow: [
           BoxShadow(
-            color: Colors.grey.withOpacity(0.1),
+            color: Colors.grey.withOpacity(0.05),
             blurRadius: 10,
             offset: const Offset(0, 4),
           ),
@@ -480,7 +631,7 @@ class _DashboardTabState extends State<DashboardTab> {
             ),
             child: Icon(icon, color: iconColor, size: 28),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           Text(
             title,
             style: TextStyle(
@@ -497,10 +648,10 @@ class _DashboardTabState extends State<DashboardTab> {
             children: [
               Text(
                 value != null ? value.toStringAsFixed(1) : "--",
-                style: const TextStyle(
+                style: TextStyle(
                   fontWeight: FontWeight.bold,
                   fontSize: 26,
-                  color: Colors.black87,
+                  color: alert ? Colors.red.shade700 : Colors.black87,
                 ),
               ),
               const SizedBox(width: 4),
@@ -514,29 +665,28 @@ class _DashboardTabState extends State<DashboardTab> {
               ),
             ],
           ),
+          const SizedBox(height: 4),
+          Text(
+            "Target: ${_fmtNum(target)}${target != null ? unit : ''}",
+            style: TextStyle(
+              fontSize: 12,
+              color: alert ? Colors.red.shade400 : Colors.grey.shade500,
+            ),
+          ),
         ],
       ),
     );
   }
 
-  // --- New AI Harvest Card Widget ---
   Widget _buildHarvestCard() {
     Color statusColor = _harvestStatus.toLowerCase().contains("ready")
         ? Colors.orange.shade800
         : Colors.green.shade600;
-
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: Colors.green.shade100, width: 2),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.grey.withOpacity(0.1),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
       ),
       child: Padding(
         padding: const EdgeInsets.all(20.0),
@@ -626,20 +776,6 @@ class _DashboardTabState extends State<DashboardTab> {
                       color: statusColor,
                     ),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 15),
-            const Divider(),
-            const SizedBox(height: 5),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                const Icon(Icons.sync, size: 14, color: Colors.grey),
-                const SizedBox(width: 5),
-                Text(
-                  "Last scan: $_lastHarvestUpdate",
-                  style: const TextStyle(fontSize: 12, color: Colors.grey),
                 ),
               ],
             ),

@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 // --- Screen Imports ---
 import 'farmer_dashboard_screen.dart';
 import 'admin_configuration_screen.dart';
+import 'splash_screen.dart';
 
 // Global flag to prevent auto-login after registration
 bool isRegisteringProcess = false;
@@ -30,11 +31,13 @@ class _LoginScreenState extends State<LoginScreen> {
   final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   bool _isLoading = false;
+  bool _obscurePassword = true; // password show / hide (login screen)
 
   // ─────────────────────────────────────────────
   // Show a SnackBar message at the bottom of the screen
   // ─────────────────────────────────────────────
   void _showSnackBar(String message, {bool isError = false}) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
@@ -166,14 +169,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   // ─────────────────────────────────────────────
   // Fetch user role from Firestore WHILE user is still signed in,
-  // then navigate or show dialog based on role + selected login mode.
-  //
-  // Login Mode | Stored Role | Result
-  // -----------+-------------+--------------------------------------------
-  // Admin UI   | Admin       | ✅ Go to AdminConfigurationScreen
-  // Admin UI   | Farmer      | ❌ Show "No Permission" dialog → sign out
-  // Farmer UI  | Farmer      | ✅ Go to FarmerDashboardScreen
-  // Farmer UI  | Admin       | ⚠️  Show confirmation dialog → Yes/No
+  // then navigate to Splash Screen with the specific Target Dashboard.
   // ─────────────────────────────────────────────
   Future<void> _fetchUserRoleAndNavigate(User user) async {
     try {
@@ -197,9 +193,12 @@ class _LoginScreenState extends State<LoginScreen> {
           await _auth.signOut();
           if (mounted) await _showNoPermissionDialog();
         } else if (storedRole == 'Admin') {
-          // Admin → Admin login → ALLOW
+          // Admin → Admin login → ALLOW (Go to Splash -> Admin Panel)
           Navigator.of(context).pushReplacement(
-            MaterialPageRoute(builder: (_) => const AdminConfigurationScreen()),
+            MaterialPageRoute(
+              builder: (_) =>
+                  const SplashScreen(targetScreen: AdminConfigurationScreen()),
+            ),
           );
         } else {
           await _auth.signOut();
@@ -211,20 +210,24 @@ class _LoginScreenState extends State<LoginScreen> {
       // ── CASE 2: FARMER login mode selected ──
       else {
         if (storedRole == 'Farmer') {
-          // Farmer → Farmer login → ALLOW
+          // Farmer → Farmer login → ALLOW (Go to Splash -> Farmer Dashboard)
           Navigator.of(context).pushReplacement(
-            MaterialPageRoute(builder: (_) => const FarmerDashboardScreen()),
+            MaterialPageRoute(
+              builder: (_) =>
+                  const SplashScreen(targetScreen: FarmerDashboardScreen()),
+            ),
           );
         } else if (storedRole == 'Admin') {
           // Admin trying Farmer login → show confirmation dialog
           bool confirm = await _showAdminAsFarmerConfirmation();
 
           if (confirm) {
-            // Admin said YES → go to Farmer Dashboard
+            // Admin said YES → (Go to Splash -> Farmer Dashboard)
             if (mounted) {
               Navigator.of(context).pushReplacement(
                 MaterialPageRoute(
-                  builder: (_) => const FarmerDashboardScreen(),
+                  builder: (_) =>
+                      const SplashScreen(targetScreen: FarmerDashboardScreen()),
                 ),
               );
             }
@@ -292,15 +295,24 @@ class _LoginScreenState extends State<LoginScreen> {
     final TextEditingController regConfirmPasswordController =
         TextEditingController();
 
+    // IMPORTANT: these live OUTSIDE the StatefulBuilder so they are not
+    // reset to their defaults every time the dialog rebuilds.
+    bool isRegistering = false;
+    bool obscureRegPassword = true;
+    bool obscureRegConfirm = true;
+
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (BuildContext dialogContext) {
         return StatefulBuilder(
           builder: (BuildContext context, StateSetter setState) {
-            bool isRegistering = false;
-
             Future<void> performRegistration() async {
+              if (regEmailController.text.trim().isEmpty) {
+                _showSnackBar('Please enter your email.', isError: true);
+                return;
+              }
+
               if (regPasswordController.text !=
                   regConfirmPasswordController.text) {
                 _showSnackBar('Passwords do not match.', isError: true);
@@ -348,7 +360,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 // Step 5: Show success alert
                 if (mounted) {
                   showDialog(
-                    context: context,
+                    context: this.context,
                     barrierDismissible: false,
                     builder: (BuildContext alertContext) {
                       return AlertDialog(
@@ -407,11 +419,11 @@ class _LoginScreenState extends State<LoginScreen> {
                   e.message ?? 'Registration failed.',
                   isError: true,
                 );
-                setState(() => isRegistering = false);
+                if (context.mounted) setState(() => isRegistering = false);
               } catch (e) {
                 isRegisteringProcess = false;
                 _showSnackBar('Unexpected error occurred.', isError: true);
-                setState(() => isRegistering = false);
+                if (context.mounted) setState(() => isRegistering = false);
               }
             }
 
@@ -464,17 +476,41 @@ class _LoginScreenState extends State<LoginScreen> {
                             const SizedBox(height: 10),
                             TextField(
                               controller: regPasswordController,
-                              obscureText: true,
-                              decoration: const InputDecoration(
+                              obscureText: obscureRegPassword,
+                              decoration: InputDecoration(
                                 labelText: 'Password (Min 6 chars)',
+                                suffixIcon: IconButton(
+                                  icon: Icon(
+                                    obscureRegPassword
+                                        ? Icons.visibility_off_outlined
+                                        : Icons.visibility_outlined,
+                                    color: Colors.grey,
+                                  ),
+                                  onPressed: () => setState(
+                                    () => obscureRegPassword =
+                                        !obscureRegPassword,
+                                  ),
+                                ),
                               ),
                             ),
                             const SizedBox(height: 10),
                             TextField(
                               controller: regConfirmPasswordController,
-                              obscureText: true,
-                              decoration: const InputDecoration(
+                              obscureText: obscureRegConfirm,
+                              decoration: InputDecoration(
                                 labelText: 'Confirm Password',
+                                suffixIcon: IconButton(
+                                  icon: Icon(
+                                    obscureRegConfirm
+                                        ? Icons.visibility_off_outlined
+                                        : Icons.visibility_outlined,
+                                    color: Colors.grey,
+                                  ),
+                                  onPressed: () => setState(
+                                    () =>
+                                        obscureRegConfirm = !obscureRegConfirm,
+                                  ),
+                                ),
                               ),
                             ),
                           ],
@@ -538,18 +574,17 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  // Reusable text field decoration
+  // Reusable text field decoration.
+  // `suffix` is any widget (e.g. a tappable IconButton for show/hide password).
   InputDecoration _inputDecoration({
     required String hint,
     required IconData icon,
-    IconData? suffixIcon,
+    Widget? suffix,
   }) {
     return InputDecoration(
       hintText: hint,
       prefixIcon: Icon(icon, color: Colors.grey),
-      suffixIcon: suffixIcon != null
-          ? Icon(suffixIcon, color: Colors.grey)
-          : null,
+      suffixIcon: suffix,
       contentPadding: const EdgeInsets.symmetric(
         vertical: 16.0,
         horizontal: 10.0,
@@ -579,7 +614,7 @@ class _LoginScreenState extends State<LoginScreen> {
               SizedBox(height: screenHeight * 0.1),
 
               // App logo
-              Image.asset('assets/smartgreen_logo.png', height: 80, width: 80),
+              Image.asset('assets/icon/app_icon.png', height: 80, width: 80),
               const SizedBox(height: 10),
 
               // App name
@@ -623,20 +658,29 @@ class _LoginScreenState extends State<LoginScreen> {
                 controller: _usernameController,
                 keyboardType: TextInputType.emailAddress,
                 decoration: _inputDecoration(
-                  hint: 'Username',
+                  hint: 'Email',
                   icon: Icons.person_outline,
                 ),
               ),
               const SizedBox(height: 20),
 
-              // Password input
+              // Password input (with show / hide toggle)
               TextField(
                 controller: _passwordController,
-                obscureText: true,
+                obscureText: _obscurePassword,
                 decoration: _inputDecoration(
                   hint: 'Password',
                   icon: Icons.lock_outline,
-                  suffixIcon: Icons.visibility_off_outlined,
+                  suffix: IconButton(
+                    icon: Icon(
+                      _obscurePassword
+                          ? Icons.visibility_off_outlined
+                          : Icons.visibility_outlined,
+                      color: Colors.grey,
+                    ),
+                    onPressed: () =>
+                        setState(() => _obscurePassword = !_obscurePassword),
+                  ),
                 ),
               ),
               const SizedBox(height: 30),
