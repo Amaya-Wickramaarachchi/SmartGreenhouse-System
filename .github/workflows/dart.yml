@@ -35,6 +35,11 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Create .env file
+        run: |
+          echo "MQTT_USERNAME=${{ secrets.MQTT_USERNAME }}" >> .env
+          echo "MQTT_PASSWORD=${{ secrets.MQTT_PASSWORD }}" >> .env
+
       - name: Analyze project source
         run: flutter analyze --no-fatal-infos
 
