@@ -153,8 +153,6 @@ flowchart TB
 | Equipment management | Users issue manual-control commands, while the system supports automated operation. |
 | Data storage | Selected application data is stored using Firebase services. |
 
-*Note: This diagram represents the principal logical components. Actual communication paths and device responsibilities should be aligned with the implemented firmware, edge-processing scripts, and application code.*
-
 ---
 
 ## 5. Multi-Device Control and Manual Override
@@ -196,8 +194,6 @@ sequenceDiagram
 - The application includes logic to return to AUTO mode when the last locally tracked manual override ends.
 - Pressing AUTO cancels the active application timers and resets the local control interface.
 
-**Implementation consideration:** Application-side timers are not automatically shared between phones. Reliable synchronization of actual hardware states and countdowns requires a shared state source and suitable timer management in the controller or edge component. Retained MQTT state messages or equivalent persistent state management can support clients that connect later.
-
 ---
 
 ## 6. Technology Stack
@@ -219,16 +215,12 @@ sequenceDiagram
 
 ## 7. MQTT Topics and Message Formats
 
-The following topics represent the communication interface described for the application.
-
 | Topic | Direction | Example payload | Purpose |
 |---|---|---|---|
 | `greenhouse/telemetry` | Edge/controller → application | `{"temp":28.4,"hum":71}` | Environmental monitoring |
 | `greenhouse/fruit_result` | Edge processing → application | `{"ready":5}` | Harvest analysis results |
 | `greenhouse/mode` | Application ↔ connected components | `{"mode":"MANUAL"}` | Operating-mode communication |
 | `greenhouse/manual_cmd` | Application → connected components | `{"fan":"ON"}` | Manual equipment commands |
-
-The exact payload fields must match those implemented by the publisher and subscriber on each component. The examples above are illustrative and should not be interpreted as a complete message schema.
 
 ---
 
@@ -240,8 +232,6 @@ SmartGreen integrates AI-based image analysis for two agricultural tasks.
 |---|---|---|
 | YOLOv8 | Fruit detection and harvest analysis | 84.3% mAP50 |
 | Custom CNN | Plant leaf disease classification | Approximately 91.8% validation accuracy |
-
-The reported results describe the model evaluations conducted during development. They do not, by themselves, establish performance under all greenhouse conditions. Dataset composition, class distribution, image quality, and evaluation methodology should be considered when interpreting these metrics.
 
 ---
 
@@ -261,8 +251,6 @@ The reported results describe the model evaluations conducted during development
 | LED grow lights | Supplemental lighting |
 | Camera and edge-processing device | Image capture and AI-based analysis |
 
-The final hardware configuration should be documented according to the components actually used in the prototype.
-
 ---
 
 ## 10. Installation and Configuration
@@ -277,10 +265,9 @@ The final hardware configuration should be documented according to the component
 
 ### 10.2 Clone the Repository
 
-Replace the placeholder with the actual repository URL.
 
 ```bash
-git clone https://github.com/<your-username>/SmartGreen.git
+git clone https://github.com/amaya-wickramaarachchi/SmartGreenhouse-System.git
 cd SmartGreen
 ```
 
@@ -293,11 +280,6 @@ MQTT_USERNAME=your_mqtt_username
 MQTT_PASSWORD=your_mqtt_password
 ```
 
-Ensure that the application loads the environment file during initialization and that the required variables are available before establishing the MQTT connection.
-
-The `.env` file should be excluded from version control. Use `.env.example` to document the required variable names without exposing credentials.
-
-**Security note:** Environment variables bundled into a mobile application are not fully secret. For production deployments, use appropriately restricted broker credentials and access-control policies. Rotate any credentials that have previously been exposed.
 
 ### 10.4 Configure Firebase
 
@@ -306,8 +288,6 @@ Configure the Firebase project using the official FlutterFire setup procedure.
 ```bash
 flutterfire configure
 ```
-
-Add the platform-specific Firebase configuration required by the project. Do not commit private credentials or environment-specific secrets to the repository.
 
 ### 10.5 Install Dependencies and Run
 
@@ -335,9 +315,6 @@ The generated APK files are normally located in:
 ```text
 build/app/outputs/flutter-apk/
 ```
-
-Verify that the Android application has the required internet permission and that environment configuration is included correctly in the Flutter build.
-
 ---
 
 ## 12. Project Structure
@@ -358,26 +335,18 @@ SmartGreen/
 ├── pubspec.yaml
 └── README.md
 ```
-
-*The structure above is illustrative. Additional firmware, edge-processing, AI-model, and documentation directories may exist in the complete system repository.*
-
 ---
 
 ## 13. Application Screenshots
 
-Screenshots can be added to the repository to demonstrate the implemented interfaces.
 
 | Dashboard | Equipment Control | Disease Diagnosis |
 |---|---|---|
 | ![Dashboard screenshot](docs/screenshots/dashboard.png) | ![Equipment control screenshot](docs/screenshots/control.png) | ![Disease diagnosis screenshot](docs/screenshots/diagnosis.png) |
 
-Place the corresponding image files in `docs/screenshots/` and update the paths if the actual filenames differ.
-
 ---
 
 ## 14. Future Enhancements
-
-The following items identify potential improvements beyond the currently described functionality.
 
 - [ ] Implement persistent actuator-state reporting to improve synchronization across multiple phones.
 - [ ] Synchronize timer start times and remaining durations across connected clients.
@@ -387,8 +356,6 @@ The following items identify potential improvements beyond the currently describ
 - [ ] Implement push notifications for harvest results and significant environmental conditions.
 - [ ] Expand model evaluation using additional images and varied greenhouse conditions.
 - [ ] Strengthen MQTT access control and mobile application security.
-
-These items should remain in the roadmap only where the functionality has not yet been completed and verified.
 
 ---
 
