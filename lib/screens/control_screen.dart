@@ -3,6 +3,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' show FontFeature;
 // Import MQTT client packages for real-time IoT communication
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
@@ -17,6 +18,15 @@ class ControlScreen extends StatefulWidget {
 class _ControlScreenState extends State<ControlScreen> {
   // MQTT client instance
   MqttServerClient? client;
+
+  // Device display names (used by remote-command handler)
+  static const Map<String, String> _names = {
+    'pump': 'Water Pump',
+    'fan': 'Ventilation Fan',
+    'mister': 'Mister',
+    'shade': 'Shade Net',
+    'led': 'Grow Lights',
+  };
 
   // --- System Mode State ---
   // Tracks whether the greenhouse is operating autonomously or manually
@@ -52,10 +62,13 @@ class _ControlScreenState extends State<ControlScreen> {
 
   // --- MQTT Connection Setup ---
   Future<void> _setupMqttConnection() async {
+    // One client ID used everywhere
+    final clientId = 'flutter_ctrl_${DateTime.now().millisecondsSinceEpoch}';
+
     // Initialize the client with the HiveMQ cloud broker URL and a unique client ID
     client = MqttServerClient.withPort(
       'c0eacb6e24dd4984814b3e19f4daa7a4.s1.eu.hivemq.cloud',
-      'flutter_ctrl_${DateTime.now().millisecondsSinceEpoch}',
+      clientId,
       8883, // Secure MQTT port
     );
 
@@ -66,9 +79,7 @@ class _ControlScreenState extends State<ControlScreen> {
 
     // Authenticate securely using environment variables loaded from the .env file
     client!.connectionMessage = MqttConnectMessage()
-        .withClientIdentifier(
-          'flutter_ctrl_${DateTime.now().millisecondsSinceEpoch}',
-        )
+        .withClientIdentifier(clientId)
         .authenticateAs(
           dotenv.env['MQTT_USERNAME']!, // Securely fetched username
           dotenv.env['MQTT_PASSWORD']!, // Securely fetched password
@@ -76,10 +87,120 @@ class _ControlScreenState extends State<ControlScreen> {
 
     try {
       await client!.connect();
-      print("Control Screen MQTT Connected Successfully!");
+
+      if (client!.connectionStatus?.state == MqttConnectionState.connected) {
+        debugPrint("Control Screen MQTT Connected Successfully!");
+
+        // Subscribe so this phone also hears what other phones do
+        client!.subscribe('greenhouse/mode', MqttQos.atLeastOnce);
+        client!.subscribe('greenhouse/manual_cmd', MqttQos.atLeastOnce);
+
+        client!.updates?.listen((messages) {
+          for (final message in messages) {
+            final publishMessage = message.payload as MqttPublishMessage;
+            final payload = MqttPublishPayload.bytesToStringAsString(
+              publishMessage.payload.message,
+            );
+            try {
+              final data = jsonDecode(payload);
+              if (!mounted || data is! Map) continue;
+
+              if (message.topic == 'greenhouse/mode') {
+                _onRemoteMode(data);
+              } else if (message.topic == 'greenhouse/manual_cmd') {
+                _onRemoteCmd(data);
+              }
+            } catch (e) {
+              debugPrint('MQTT update error: $e');
+            }
+          }
+        });
+      } else {
+        debugPrint("Control Screen MQTT connection was not successful.");
+      }
     } catch (e) {
-      print("Control Screen MQTT Connection Failed: $e");
-      client!.disconnect();
+      debugPrint("Control Screen MQTT Connection Failed: $e");
+      client?.disconnect();
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Remote sync handlers (messages coming from other phones)
+  // ---------------------------------------------------------------
+
+  // Sets one device's local ON/OFF flag by its id
+  void _setLocal(String id, bool v) {
+    switch (id) {
+      case 'pump':
+        _isPumpOn = v;
+        break;
+      case 'fan':
+        _isFanOn = v;
+        break;
+      case 'mister':
+        _isMisterOn = v;
+        break;
+      case 'shade':
+        _isShadeOn = v;
+        break;
+      case 'led':
+        _isLedOn = v;
+        break;
+    }
+  }
+
+  // Another phone changed the system mode
+  void _onRemoteMode(Map data) {
+    final mode = data['mode']?.toString().toUpperCase();
+    if (mode != 'AUTO' && mode != 'MANUAL') return;
+
+    setState(() {
+      _systemMode = mode!;
+      if (mode == 'AUTO') {
+        // AUTO from any phone resets timers and switches everywhere
+        for (var t in _activeTimers.values) {
+          t.cancel();
+        }
+        _activeTimers.clear();
+        _endTimes.clear();
+        _totalSeconds.clear();
+        _ticker?.cancel();
+        _ticker = null;
+        _isPumpOn = false;
+        _isFanOn = false;
+        _isMisterOn = false;
+        _isShadeOn = false;
+        _isLedOn = false;
+      }
+    });
+  }
+
+  // Another phone turned a device ON/OFF
+  void _onRemoteCmd(Map data) {
+    for (final id in _names.keys) {
+      if (!data.containsKey(id)) continue;
+      final on = data[id].toString().toUpperCase() == 'ON';
+
+      if (on) {
+        setState(() => _setLocal(id, true));
+        final secs = int.tryParse(data['duration']?.toString() ?? '');
+        // Skip if this phone already has the timer (this is our own message echoed back)
+        if (secs != null && secs > 0 && !_activeTimers.containsKey(id)) {
+          _handleActuatorTimer(
+            id,
+            _names[id]!,
+            0,
+            () => setState(() => _setLocal(id, false)),
+            seconds: secs,
+          );
+        }
+      } else {
+        // Device turned OFF elsewhere: stop our timer and countdown too
+        _activeTimers[id]?.cancel();
+        _activeTimers.remove(id);
+        _clearCountdown(id);
+        setState(() => _setLocal(id, false));
+      }
     }
   }
 
@@ -99,12 +220,18 @@ class _ControlScreenState extends State<ControlScreen> {
     }
   }
 
-  // Publishes direct hardware commands (ON/OFF) to specific actuators
-  void _publishManualCmd(String device, String state) {
+  // Publishes direct hardware commands (ON/OFF) to specific actuators.
+  // For ON, the duration (seconds) is included so other phones can start the same countdown.
+  void _publishManualCmd(String device, String state, {int? durationSeconds}) {
     if (client?.connectionStatus?.state == MqttConnectionState.connected) {
       final builder = MqttClientPayloadBuilder();
-      // Format payload as JSON: {"fan": "ON"}
-      builder.addString(jsonEncode({device: state}));
+      // Format payload as JSON: {"fan": "ON", "duration": 300}
+      builder.addString(
+        jsonEncode({
+          device: state,
+          if (durationSeconds != null) 'duration': durationSeconds,
+        }),
+      );
       client!.publishMessage(
         'greenhouse/manual_cmd',
         MqttQos.atLeastOnce,
@@ -195,23 +322,27 @@ class _ControlScreenState extends State<ControlScreen> {
   }
 
   // --- Core Safety Feature: Dual-Layer Timer Management ---
-  // Handles the logic when a manual override timer expires
+  // Handles the logic when a manual override timer expires.
+  // `duration` is in minutes; `seconds` (optional) overrides it for remote timers.
   void _handleActuatorTimer(
     String actuatorId,
     String name,
     int duration,
-    Function turnOffAction,
-  ) {
+    Function turnOffAction, {
+    int? seconds,
+  }) {
     // Cancel any existing timer for this specific device before starting a new one
     _activeTimers[actuatorId]?.cancel();
 
+    final secs = seconds ?? duration * 60;
+
     // Remember when this timer ends so the card can show a live countdown
-    _endTimes[actuatorId] = DateTime.now().add(Duration(minutes: duration));
-    _totalSeconds[actuatorId] = duration * 60;
+    _endTimes[actuatorId] = DateTime.now().add(Duration(seconds: secs));
+    _totalSeconds[actuatorId] = secs;
     _startTicker();
 
-    // Start a new timer based on the user's selected duration (in minutes)
-    _activeTimers[actuatorId] = Timer(Duration(minutes: duration), () {
+    // Start a new timer based on the selected duration
+    _activeTimers[actuatorId] = Timer(Duration(seconds: secs), () {
       if (mounted) {
         turnOffAction(); // Step 1: Update local App UI state to OFF
         _publishManualCmd(
@@ -416,12 +547,12 @@ class _ControlScreenState extends State<ControlScreen> {
     _showConfirmationDialog('Water Pump', value, (confirmed, duration) {
       setState(() => _isPumpOn = confirmed);
       if (confirmed) {
-        _publishManualCmd("pump", "ON");
+        _publishManualCmd("pump", "ON", durationSeconds: duration! * 60);
         _showActionSnackBar('Water Pump ON for $duration minutes.');
         _handleActuatorTimer(
           'pump',
           'Water Pump',
-          duration!,
+          duration,
           () => setState(() => _isPumpOn = false),
         );
       } else {
@@ -434,12 +565,12 @@ class _ControlScreenState extends State<ControlScreen> {
     _showConfirmationDialog('Ventilation Fan', value, (confirmed, duration) {
       setState(() => _isFanOn = confirmed);
       if (confirmed) {
-        _publishManualCmd("fan", "ON");
+        _publishManualCmd("fan", "ON", durationSeconds: duration! * 60);
         _showActionSnackBar('Ventilation Fan ON for $duration minutes.');
         _handleActuatorTimer(
           'fan',
           'Ventilation Fan',
-          duration!,
+          duration,
           () => setState(() => _isFanOn = false),
         );
       } else {
@@ -452,12 +583,12 @@ class _ControlScreenState extends State<ControlScreen> {
     _showConfirmationDialog('Mister', value, (confirmed, duration) {
       setState(() => _isMisterOn = confirmed);
       if (confirmed) {
-        _publishManualCmd("mister", "ON");
+        _publishManualCmd("mister", "ON", durationSeconds: duration! * 60);
         _showActionSnackBar('Mister ON for $duration minutes.');
         _handleActuatorTimer(
           'mister',
           'Mister',
-          duration!,
+          duration,
           () => setState(() => _isMisterOn = false),
         );
       } else {
@@ -470,12 +601,12 @@ class _ControlScreenState extends State<ControlScreen> {
     _showConfirmationDialog('Shade Net', value, (confirmed, duration) {
       setState(() => _isShadeOn = confirmed);
       if (confirmed) {
-        _publishManualCmd("shade", "ON");
+        _publishManualCmd("shade", "ON", durationSeconds: duration! * 60);
         _showActionSnackBar('Shade Net ON for $duration minutes.');
         _handleActuatorTimer(
           'shade',
           'Shade Net',
-          duration!,
+          duration,
           () => setState(() => _isShadeOn = false),
         );
       } else {
@@ -488,12 +619,12 @@ class _ControlScreenState extends State<ControlScreen> {
     _showConfirmationDialog('Grow Lights', value, (confirmed, duration) {
       setState(() => _isLedOn = confirmed);
       if (confirmed) {
-        _publishManualCmd("led", "ON");
+        _publishManualCmd("led", "ON", durationSeconds: duration! * 60);
         _showActionSnackBar('Grow Lights ON for $duration minutes.');
         _handleActuatorTimer(
           'led',
           'Grow Lights',
-          duration!,
+          duration,
           () => setState(() => _isLedOn = false),
         );
       } else {
